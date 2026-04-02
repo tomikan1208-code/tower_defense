@@ -3,6 +3,7 @@ package dev.antigravity.td;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.MinecraftServer;
@@ -12,13 +13,14 @@ import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.EntityType;
 import net.minestom.server.entity.Player;
 import net.minestom.server.instance.InstanceContainer;
-import net.minestom.server.instance.block.Block;
 
 public final class TDGame {
     private final InstanceContainer instance;
     private final List<Point> path;
     private final List<EnemyUnit> enemies = new ArrayList<>();
     private final List<Tower> towers = new ArrayList<>();
+    private final List<Projectile> projectiles = new ArrayList<>();
+    private final int layerNumber;
 
     private int tickCounter = 0;
     private int wave = 0;
@@ -29,9 +31,10 @@ public final class TDGame {
     private boolean waveRewardGranted = true;
     private boolean waveClearPending = false;
 
-    public TDGame(InstanceContainer instance, List<Point> path) {
+    public TDGame(InstanceContainer instance, List<Point> path, int layerNumber) {
         this.instance = instance;
         this.path = path;
+        this.layerNumber = layerNumber;
     }
 
     public InstanceContainer instance() {
@@ -63,7 +66,7 @@ public final class TDGame {
         Pos p = player.getPosition();
         int originX = (int) Math.floor(p.x());
         int originZ = (int) Math.floor(p.z());
-        int baseY = Math.max(1, (int) Math.floor(p.y()) + 1);
+        int baseY = Math.max(1, (int) Math.floor(p.y()));
         tryPlaceTowerAt(player, towerTypeToken, originX, originZ, baseY);
     }
 
@@ -82,11 +85,6 @@ public final class TDGame {
 
         if (isTooCloseToPath(originX, originZ, towerType) || hasTowerOverlap(originX, originZ, towerType)) {
             player.sendMessage(Component.text("設置不可: 道沿いか、既存塔と重複しています"));
-            return;
-        }
-
-        if (!hasSupportBlocks(originX, originZ, baseY, towerType)) {
-            player.sendMessage(Component.text("設置不可: ブロックの1段上にのみ設置できます"));
             return;
         }
 
@@ -109,6 +107,7 @@ public final class TDGame {
 
         updateEnemies();
         updateTowers();
+        updateProjectiles();
         updateBattleUi();
 
         if (baseHp <= 0) {
@@ -129,36 +128,16 @@ public final class TDGame {
         return playerGold;
     }
 
-    public Tower findTowerAt(int x, int z) {
-        for (Tower tower : towers) {
-            int minX = tower.originX();
-            int minZ = tower.originZ();
-            int maxX = minX + tower.type().sizeX() - 1;
-            int maxZ = minZ + tower.type().sizeZ() - 1;
-            if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
-                return tower;
-            }
-        }
-        return null;
+    public List<Projectile> projectiles() {
+        return projectiles;
     }
 
-    public boolean tryUpgradeTower(Player player, Tower tower) {
-        if (tower == null) {
-            return false;
-        }
-        if (!tower.canUpgrade()) {
-            player.sendMessage(Component.text("このタワーは最大レベルです", NamedTextColor.RED));
-            return false;
-        }
-        int cost = tower.upgradeCost();
-        if (playerGold < cost) {
-            player.sendMessage(Component.text("ゴールド不足: " + playerGold + "/" + cost, NamedTextColor.RED));
-            return false;
-        }
-        playerGold -= cost;
-        tower.upgrade();
-        player.sendMessage(Component.text(tower.type().displayName() + " を強化しました (Lv" + tower.level() + ")", NamedTextColor.GREEN));
-        return true;
+    public List<Tower> towers() {
+        return towers;
+    }
+
+    public List<EnemyUnit> enemies() {
+        return enemies;
     }
 
     public String towerCatalog() {
@@ -180,12 +159,84 @@ public final class TDGame {
     }
 
     private void spawnEnemy() {
-        Entity body = new Entity(EntityType.ZOMBIE);
+        // 敵タイプをランダムに選択（重みに基づいて）
+        EnemyType selectedType = selectEnemyTypeByWeight();
+        
+        // EntityTypeの作成
+        Entity body = new Entity(selectedType.entityType());
         body.setNoGravity(true);
         body.setInstance(instance, path.get(0));
 
-        EnemyUnit enemy = new EnemyUnit(body, path, 14.0 + wave * 2.0, 0.03 + wave * 0.004);
+        // 敵パラメータ計算
+        double maxHp = selectedType.calculateMaxHp(wave, layerNumber);
+        double speed = selectedType.calculateSpeed(wave, layerNumber);
+        int goldReward = selectedType.calculateGoldReward(wave, layerNumber);
+
+        EnemyUnit enemy = new EnemyUnit(body, path, selectedType, maxHp, speed, goldReward);
         enemies.add(enemy);
+    }
+
+    /**
+     * 敵タイプごとの重みに基づいてランダムに敵タイプを選択
+     * Wave進行に応じて敵構成が段階的に変わる
+     * 
+     * Wave 1-2: 通常敵主体 (NORMAL 85%, FAST 15%)
+     * Wave 3-4: 多様化開始 (NORMAL 70%, FAST 20%, ARMORED 10%)
+     * Wave 5-6: 装甲敵増加 (NORMAL 55%, FAST 25%, ARMORED 20%)
+     * Wave 7-8: 高難度 (NORMAL 40%, FAST 25%, ARMORED 30%, BOSS 5%)
+     * Wave 9+: 最高難度 (NORMAL 30%, FAST 25%, ARMORED 35%, BOSS 10%)
+     */
+    private EnemyType selectEnemyTypeByWeight() {
+        int rand = ThreadLocalRandom.current().nextInt(100);
+
+        if (wave <= 2) {
+            // Wave 1-2: 通常敵がメイン
+            if (rand < 85) {
+                return EnemyType.NORMAL;
+            } else {
+                return EnemyType.FAST;
+            }
+        } else if (wave <= 4) {
+            // Wave 3-4: 装甲敵登場開始
+            if (rand < 70) {
+                return EnemyType.NORMAL;
+            } else if (rand < 90) {
+                return EnemyType.FAST;
+            } else {
+                return EnemyType.ARMORED;
+            }
+        } else if (wave <= 6) {
+            // Wave 5-6: 装甲敵が増加
+            if (rand < 55) {
+                return EnemyType.NORMAL;
+            } else if (rand < 80) {
+                return EnemyType.FAST;
+            } else {
+                return EnemyType.ARMORED;
+            }
+        } else if (wave <= 8) {
+            // Wave 7-8: 装甲敵がさらに増加、ボス敵登場
+            if (rand < 40) {
+                return EnemyType.NORMAL;
+            } else if (rand < 65) {
+                return EnemyType.FAST;
+            } else if (rand < 95) {
+                return EnemyType.ARMORED;
+            } else {
+                return EnemyType.BOSS;
+            }
+        } else {
+            // Wave 9+: 最高難度
+            if (rand < 30) {
+                return EnemyType.NORMAL;
+            } else if (rand < 55) {
+                return EnemyType.FAST;
+            } else if (rand < 90) {
+                return EnemyType.ARMORED;
+            } else {
+                return EnemyType.BOSS;
+            }
+        }
     }
 
     private void updateEnemies() {
@@ -195,6 +246,21 @@ public final class TDGame {
             if (enemy.isDead()) {
                 enemy.body().remove();
                 it.remove();
+                playerGold += enemy.goldReward();
+                
+                // 敵タイプごとのメッセージカラーを変える
+                NamedTextColor color = switch(enemy.type()) {
+                    case NORMAL -> NamedTextColor.WHITE;
+                    case FAST -> NamedTextColor.YELLOW;
+                    case ARMORED -> NamedTextColor.GOLD;
+                    case BOSS -> NamedTextColor.RED;
+                };
+                Component msg = Component.text()
+                    .append(Component.text("敵撃破! "))
+                    .append(Component.text(enemy.type().displayName(), color))
+                    .append(Component.text(" +" + enemy.goldReward() + "G", NamedTextColor.YELLOW))
+                    .build();
+                broadcastComponent(msg);
                 continue;
             }
 
@@ -237,11 +303,20 @@ public final class TDGame {
             }
 
             if (target != null) {
-                target.damage(tower.damage());
+                // 発射体を生成してターゲット
+                projectiles.add(new Projectile(tower, target, tower.type()));
                 tower.fire();
-                if (target.isDead()) {
-                    playerGold += 3;
-                }
+            }
+        }
+    }
+
+    private void updateProjectiles() {
+        Iterator<Projectile> iter = projectiles.iterator();
+        while (iter.hasNext()) {
+            Projectile proj = iter.next();
+            proj.tick();
+            if (!proj.isAlive()) {
+                iter.remove();
             }
         }
     }
@@ -280,21 +355,6 @@ public final class TDGame {
             }
         }
         return false;
-    }
-
-    private boolean hasSupportBlocks(int originX, int originZ, int baseY, TowerType towerType) {
-        for (int dx = 0; dx < towerType.sizeX(); dx++) {
-            for (int dz = 0; dz < towerType.sizeZ(); dz++) {
-                int tx = originX + dx;
-                int tz = originZ + dz;
-                Block support = instance.getBlock(tx, baseY - 1, tz);
-                Block towerSpace = instance.getBlock(tx, baseY, tz);
-                if (support == Block.AIR || towerSpace != Block.AIR) {
-                    return false;
-                }
-            }
-        }
-        return true;
     }
 
     private Pos footprintCenter(int originX, int baseY, int originZ, TowerType towerType) {
@@ -405,6 +465,14 @@ public final class TDGame {
 
     private void broadcast(String msg) {
         Component text = Component.text("[TD] " + msg);
+        broadcastComponent(text);
+    }
+
+    private void broadcastComponent(Component component) {
+        Component text = Component.text()
+                .append(Component.text("[TD] "))
+                .append(component)
+                .build();
         for (Player p : MinecraftServer.getConnectionManager().getOnlinePlayers()) {
             p.sendMessage(text);
         }

@@ -9,22 +9,34 @@ import net.minestom.server.entity.Entity;
 public final class EnemyUnit {
     private final Entity body;
     private final List<Point> path;
+    private final EnemyType type;
     private final double maxHp;
     private final double speed;
+    private final int goldReward;
 
     private double hp;
     private double pathProgress = 0.0;
 
-    public EnemyUnit(Entity body, List<Point> path, double maxHp, double speed) {
+    public EnemyUnit(Entity body, List<Point> path, EnemyType type, double maxHp, double speed, int goldReward) {
         this.body = body;
         this.path = path;
+        this.type = type;
         this.maxHp = maxHp;
         this.speed = speed;
+        this.goldReward = goldReward;
         this.hp = maxHp;
     }
 
     public Entity body() {
         return body;
+    }
+
+    public EnemyType type() {
+        return type;
+    }
+
+    public int goldReward() {
+        return goldReward;
     }
 
     public Pos position() {
@@ -35,8 +47,16 @@ public final class EnemyUnit {
         hp -= amount;
     }
 
+    public void takeDamage(double amount) {
+        damage(amount);
+    }
+
     public boolean isDead() {
         return hp <= 0.0;
+    }
+
+    public boolean isAlive() {
+        return hp > 0.0;
     }
 
     public void advance() {
@@ -50,7 +70,12 @@ public final class EnemyUnit {
     public void syncEntity() {
         Pos pos = lerpAlongPath(pathProgress);
         body.teleport(pos);
-        body.setCustomName(Component.text("HP " + (int) Math.ceil(hp) + "/" + (int) maxHp));
+        // 敵タイプとHPを表示
+        String hpText = String.format("%s HP %d/%d", 
+            type.displayName(), 
+            (int) Math.ceil(hp), 
+            (int) maxHp);
+        body.setCustomName(Component.text(hpText));
         body.setCustomNameVisible(true);
     }
 

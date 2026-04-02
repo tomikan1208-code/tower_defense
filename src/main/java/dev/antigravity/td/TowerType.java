@@ -92,6 +92,17 @@ public enum TowerType {
         return effectLabel;
     }
 
+    public ProjectileColor projectileColor() {
+        return switch (effectLabel) {
+            case "火炎" -> ProjectileColor.FLAME;
+            case "冷気" -> ProjectileColor.FROST;
+            case "電撃" -> ProjectileColor.LIGHTNING;
+            case "毒" -> ProjectileColor.POISON;
+            case "氷結" -> ProjectileColor.SNOWBALL;
+            default -> ProjectileColor.BASIC;
+        };
+    }
+
     public static TowerType fromToken(String token) {
         if (token == null || token.isBlank()) {
             return BASIC;
@@ -115,5 +126,24 @@ public enum TowerType {
             out.append(type.key);
         }
         return out.toString();
+    }
+
+    public enum ProjectileColor {
+        BASIC(0.8f, 0.8f, 0.8f),              // グレー
+        FLAME(1.0f, 0.5f, 0.0f),              // オレンジ/赤
+        FROST(0.3f, 0.7f, 1.0f),              // 水色
+        LIGHTNING(1.0f, 1.0f, 0.3f),          // 黄色
+        POISON(0.4f, 1.0f, 0.2f),             // 緑
+        SNOWBALL(0.9f, 0.95f, 1.0f);          // 淡白/水色
+
+        public final float r;
+        public final float g;
+        public final float b;
+
+        ProjectileColor(float r, float g, float b) {
+            this.r = r;
+            this.g = g;
+            this.b = b;
+        }
     }
 }
