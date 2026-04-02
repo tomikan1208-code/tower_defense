@@ -24,6 +24,7 @@ import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockInteractEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
 import net.minestom.server.event.player.PlayerHandAnimationEvent;
+import net.minestom.server.event.player.PlayerUseItemEvent;
 import net.minestom.server.inventory.Inventory;
 import net.minestom.server.inventory.InventoryType;
 import net.minestom.server.instance.Instance;
@@ -99,6 +100,17 @@ public final class GameFlowController {
         // 左クリックで配置選択をキャンセル
         if (selectedBuildByPlayer.remove(player.getUuid()) != null) {
             player.sendMessage(Component.text("配置選択をキャンセルしました", NamedTextColor.GRAY));
+        }
+    }
+
+    public void onPlayerUseItem(PlayerUseItemEvent event) {
+        Player player = event.getPlayer();
+        Instance instance = player.getInstance();
+        if (instance == null) return;
+
+        // ステージ内のアイテム使用（空中右クリック）を拾う
+        if (instance instanceof InstanceContainer container && stageGames.containsKey(container)) {
+            handleStageBuildInteractAir(event, player, container);
         }
     }
 
@@ -522,7 +534,7 @@ public final class GameFlowController {
         return roadmapClearedLayerByPlayer.getOrDefault(player.getUuid(), 0);
     }
 
-    private void handleStageBuildInteract(PlayerBlockInteractEvent event, Player player, InstanceContainer stageInstance) {
+    private void handleStageBuildInteractAir(PlayerUseItemEvent event, Player player, InstanceContainer stageInstance) {
         ItemStack hand = player.getItemInMainHand();
         DeckOffer deck = selectedDeckByPlayer.get(player.getUuid());
         if (deck != null) {
@@ -542,6 +554,56 @@ public final class GameFlowController {
                 showDeckRootItems(player, deck);
                 return;
             }
+        }
+
+        // 配置物アイテムの処理（空中右クリック）
+        BuildSelection picked = BuildSelection.fromMaterial(hand.material());
+        if (picked == null) {
+            return;
+        }
+
+        event.setCancelled(true);
+        UUID uuid = player.getUuid();
+        BuildSelection selected = selectedBuildByPlayer.get(uuid);
+        if (selected != picked) {
+            selectedBuildByPlayer.put(uuid, picked);
+            player.sendMessage(Component.text("選択: " + picked.displayName(), NamedTextColor.AQUA));
+            return;
+        }
+
+        BlockVec origin = previewOrigin(player);
+        
+        // ブロック配置
+        if (picked.kind() == BuildKind.BLOCK) {
+            boolean ok = placeBlockShape(stageInstance, picked, origin);
+            if (ok) {
+                consumeOneMainHand(player);
+                player.sendMessage(Component.text("配置: " + picked.displayName(), NamedTextColor.GREEN));
+                selectedBuildByPlayer.remove(uuid);
+            } else {
+                player.sendMessage(Component.text("配置失敗: 重複または保護エリアです", NamedTextColor.RED));
+            }
+            return;
+        }
+
+        // タワー配置
+        TDGame game = stageGames.get(stageInstance);
+        if (game == null) {
+            return;
+        }
+
+        game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y);
+        // タワーは在庫無限（非消費）。ゴールド不足は tryPlaceTowerAt 側で拒否する。
+        // 配置後も選択状態を保持（同じタワーを複数配置可能）
+    }
+
+    private void handleStageBuildInteract(PlayerBlockInteractEvent event, Player player, InstanceContainer stageInstance) {
+        ItemStack hand = player.getItemInMainHand();
+        // カテゴリ選択アイテムはブロック操作でも拾える（ただし空中右クリックの方が優先される）
+        DeckOffer deck = selectedDeckByPlayer.get(player.getUuid());
+        if (deck != null) {
+            Material material = hand.material();
+            // ここではカテゴリクリックは処理せず、配置物のみ処理
         }
 
         BuildSelection picked = BuildSelection.fromMaterial(hand.material());
@@ -564,6 +626,8 @@ public final class GameFlowController {
             if (ok) {
                 consumeOneMainHand(player);
                 player.sendMessage(Component.text("配置: " + picked.displayName(), NamedTextColor.GREEN));
+                // 配置後は選択をクリア
+                selectedBuildByPlayer.remove(uuid);
             } else {
                 player.sendMessage(Component.text("配置失敗: 重複または保護エリアです", NamedTextColor.RED));
             }
@@ -577,6 +641,7 @@ public final class GameFlowController {
 
         game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y);
         // タワーは在庫無限（非消費）。ゴールド不足は tryPlaceTowerAt 側で拒否する。
+        // 配置後も選択状態を保持（同じタワーを複数配置可能）
     }
 
     private BlockVec previewOrigin(Player player) {
@@ -826,14 +891,59 @@ public final class GameFlowController {
             zSlots.add(12);
 
             int nodeCount = random.nextInt(2, 5);
+            int maxRetries = 20;
             for (int index = 0; index < nodeCount; index++) {
-                int slotIndex = random.nextInt(zSlots.size());
-                int zBase = zSlots.remove(slotIndex);
-                int x = baseX + random.nextInt(0, 3);
-                int z = zBase + random.nextInt(-2, 3);
-                RoadNode node = new RoadNode(new BlockVec(x, ROADMAP_Y, z), layer, stageType);
-                currentLayerNodes.add(node);
-                placeRoadmapNode(node);
+                RoadNode newNode = null;
+                int retries = 0;
+                
+                while (newNode == null && retries < maxRetries) {
+                    int slotIndex = random.nextInt(zSlots.size());
+                    int zBase = zSlots.get(slotIndex);
+                    int x = baseX + random.nextInt(0, 3);
+                    int z = zBase + random.nextInt(-2, 3);
+                    
+                    // 同一層内で既配置ノードと1ブロック以上離れているか確認
+                    boolean tooCloseToSameLayer = false;
+                    for (RoadNode existing : currentLayerNodes) {
+                        int dx = Math.abs(x - existing.center().blockX());
+                        int dz = Math.abs(z - existing.center().blockZ());
+                        int distance = Math.max(dx, dz); // チェビシェフ距離
+                        if (distance < 2) { // 1ブロック以上 = 距離が2以上
+                            tooCloseToSameLayer = true;
+                            break;
+                        }
+                    }
+                    
+                    // 前の層ノードと3ブロック以上離れているか確認
+                    boolean tooCloseToPreviousLayer = false;
+                    for (RoadNode prevNode : previousLayerNodes) {
+                        int dx = Math.abs(x - prevNode.center().blockX());
+                        int dz = Math.abs(z - prevNode.center().blockZ());
+                        int distance = Math.max(dx, dz);
+                        if (distance < 3) { // 3ブロック以上 = 距離が3以上
+                            tooCloseToPreviousLayer = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!tooCloseToSameLayer && !tooCloseToPreviousLayer) {
+                        newNode = new RoadNode(new BlockVec(x, ROADMAP_Y, z), layer, stageType);
+                    }
+                    
+                    retries++;
+                }
+                
+                if (newNode != null) {
+                    currentLayerNodes.add(newNode);
+                    placeRoadmapNode(newNode);
+                    // 成功したら該当スロットを使用済みにする
+                    for (int i = 0; i < zSlots.size(); i++) {
+                        if (Math.abs(zSlots.get(i) - newNode.center().blockZ()) < 2) {
+                            zSlots.remove(i);
+                            break;
+                        }
+                    }
+                }
             }
 
             connectLayers(previousLayerNodes, currentLayerNodes, 1, 2);

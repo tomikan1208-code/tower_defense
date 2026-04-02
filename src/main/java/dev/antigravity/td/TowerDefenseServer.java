@@ -11,6 +11,7 @@ import net.minestom.server.event.player.PlayerBlockPlaceEvent;
 import net.minestom.server.event.player.PlayerChatEvent;
 import net.minestom.server.event.player.PlayerHandAnimationEvent;
 import net.minestom.server.event.player.PlayerSpawnEvent;
+import net.minestom.server.event.player.PlayerUseItemEvent;
 import net.minestom.server.timer.TaskSchedule;
 
 public final class TowerDefenseServer {
@@ -55,6 +56,7 @@ public final class TowerDefenseServer {
         events.addListener(PlayerBlockBreakEvent.class, flow::onBlockBreak);
         events.addListener(PlayerBlockPlaceEvent.class, flow::onBlockPlace);
         events.addListener(PlayerHandAnimationEvent.class, flow::onHandAnimation);
+        events.addListener(PlayerUseItemEvent.class, flow::onPlayerUseItem);
         events.addListener(InventoryPreClickEvent.class, flow::handleInventoryPreClick);
 
         events.addListener(PlayerChatEvent.class, event -> {
