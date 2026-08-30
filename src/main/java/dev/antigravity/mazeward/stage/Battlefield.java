@@ -14,7 +14,9 @@ import dev.antigravity.mazeward.run.Deck;
 import dev.antigravity.mazeward.run.Modifiers;
 import dev.antigravity.mazeward.run.Rune;
 import dev.antigravity.mazeward.run.Wallet;
+import dev.antigravity.mazeward.enemy.Trait;
 import dev.antigravity.mazeward.tower.AttackStyle;
+import dev.antigravity.mazeward.tower.Effect;
 import dev.antigravity.mazeward.tower.TowerInstance;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
@@ -92,6 +94,9 @@ public abstract class Battlefield {
     protected static final int DAMAGE_FLUSH_INTERVAL = 8;
 
     protected static final int HEAL_INTERVAL = 20;
+
+    /** 妨害者がタワーを黙らせにいく間隔。毎 tick 見る必要はない。 */
+    protected static final int DISABLE_INTERVAL = 10;
     protected static final double CHAIN_RADIUS = 3.6;
     protected static final double PIERCE_WIDTH = 1.3;
 
@@ -147,6 +152,14 @@ public abstract class Battlefield {
 
     /** 敵がゴールへ到達した。ライフを減らすなどはここで。 */
     protected abstract void onEnemyLeaked(EnemyInstance enemy, Pos at);
+
+    /**
+     * 終焉騎が倒れずに出発点へ戻ったとき。
+     *
+     * <p>「倒しさえすれば損はない」という前提を崩すための唯一の仕掛けなので、
+     * ここでは必ず恒久的な代償（ライフ上限を奪う）を払わせる。</p>
+     */
+    protected abstract void onEnemyRevived(EnemyInstance enemy, Pos at);
 
     /** 通貨の呼び名。メッセージに使う。 */
     public String currencyName() {
@@ -289,6 +302,7 @@ public abstract class Battlefield {
         for (EnemyInstance enemy : enemies) {
             enemy.tick();
             enemy.syncBody();
+            showAbilityEffects(enemy);
 
             if (!enemy.alive()) {
                 (dead == null ? dead = new ArrayList<>() : dead).add(enemy);
@@ -302,7 +316,10 @@ public abstract class Battlefield {
             flushDamageNumbers();
         }
         if (tick % HEAL_INTERVAL == 0) {
-            applyHealerAuras();
+            applyEnemyAuras();
+        }
+        if (tick % DISABLE_INTERVAL == 0) {
+            applyDisablers();
         }
 
         if (dead != null) {
@@ -390,21 +407,82 @@ public abstract class Battlefield {
         }
     }
 
-    private void applyHealerAuras() {
-        for (EnemyInstance healer : enemies) {
-            if (!healer.kind().healer() || !healer.alive()) {
+    /**
+     * 敵側のオーラ（回復・庇護）をまとめて適用する。
+     *
+     * <p>どちらも「オーラを出している個体を先に潰す」という判断を作るためのもの。
+     * 庇護は期限つきで貼るので、庇護者が落ちればすぐに軽減が切れる。</p>
+     */
+    private void applyEnemyAuras() {
+        for (EnemyInstance source : enemies) {
+            if (!source.alive()) {
                 continue;
             }
-            Pos center = healer.position();
+            Trait trait = source.kind().trait();
+            boolean heals = source.kind().healer();
+            if (!heals && !trait.wards()) {
+                continue;
+            }
+            Pos center = source.position();
+            double radius = heals ? 5.0 : trait.wardRadius();
             for (EnemyInstance target : enemies) {
-                if (target == healer || !target.alive()) {
+                if (target == source || !target.alive()) {
                     continue;
                 }
-                if (target.position().distance(center) <= 5.0) {
-                    target.heal(healer.kind().healPerSecond());
+                if (target.position().distance(center) > radius) {
+                    continue;
+                }
+                if (heals) {
+                    target.heal(source.kind().healPerSecond());
+                } else {
+                    // 次のオーラ tick まで少しだけ余裕を持たせる
+                    target.applyWard(trait.wardReduction(), HEAL_INTERVAL + 5);
                 }
             }
-            Overlay.drawBurst(players, center.withY(center.y() + 1.2), Particle.HAPPY_VILLAGER, 4, 1.2f);
+            Overlay.drawBurst(players, center.withY(center.y() + 1.2),
+                    heals ? Particle.HAPPY_VILLAGER : Particle.ENCHANT, 4, 1.2f);
+        }
+    }
+
+    /**
+     * 妨害者が近くのタワーを黙らせる。
+     *
+     * <p>火力を 1 箇所に固めるほど、1 体でまとめて止められる。
+     * 「キルゾーンを 1 つ作れば勝ち」を崩すのが狙い。</p>
+     */
+    private void applyDisablers() {
+        for (EnemyInstance enemy : enemies) {
+            Trait trait = enemy.kind().trait();
+            if (!trait.disables() || !enemy.alive()) {
+                continue;
+            }
+            Pos pos = enemy.position();
+            boolean any = false;
+            for (TowerInstance tower : towers) {
+                if (distanceFromTower(tower, pos) > trait.disableRadius()) {
+                    continue;
+                }
+                tower.disable(trait.disableTicks());
+                any = true;
+                Overlay.drawBurst(players,
+                        new Pos(towerWorldX(tower), ArenaRenderer.WALL_TOP_Y + 0.9, towerWorldZ(tower)),
+                        Particle.LARGE_SMOKE, 3, 0.25f);
+            }
+            if (any) {
+                playSound(SoundEvent.BLOCK_FIRE_EXTINGUISH, 0.35f, 0.6f);
+            }
+        }
+    }
+
+    /** 瞬移・送還が起きた瞬間だけ演出を出す。何が起きたのか分からないと理不尽に見える。 */
+    private void showAbilityEffects(EnemyInstance enemy) {
+        Pos at = enemy.position();
+        if (enemy.consumeBlinked()) {
+            Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.PORTAL, 14, 0.6f);
+            playSound(SoundEvent.ENTITY_ENDERMAN_TELEPORT, 0.4f, 1.4f);
+        }
+        if (enemy.consumeBanished()) {
+            Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.REVERSE_PORTAL, 14, 0.6f);
         }
     }
 
@@ -467,9 +545,22 @@ public abstract class Battlefield {
     }
 
     private void handleKill(EnemyInstance enemy) {
-        enemies.remove(enemy);
         Pos at = enemy.position();
+
+        // 終焉騎は倒れる代わりに出発点へ戻る。報酬も出ない
+        if (enemy.tryRevive()) {
+            Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.SOUL, 20, 0.8f);
+            playSound(SoundEvent.ENTITY_WITHER_SPAWN, 0.5f, 1.6f);
+            onEnemyRevived(enemy, at);
+            return;
+        }
+
+        enemies.remove(enemy);
         enemy.body().remove();
+
+        if (enemy.kind().trait().splits()) {
+            spawnSplits(enemy, at);
+        }
 
         int reward = enemy.goldReward() + goldVeinBonus(at);
         wallet().gain(reward);
@@ -480,6 +571,31 @@ public abstract class Battlefield {
                     Component.text("+" + money(reward), NamedTextColor.GOLD), 14);
         }
         onEnemyKilled(enemy, at, reward);
+    }
+
+    /**
+     * 分裂体が倒れたときに子を湧かせる。
+     *
+     * <p>親の折れ線をそのまま使い、親が居た地点から歩かせる。
+     * 出発点に戻すと「倒したのに一番遠くから来直す」ことになり、
+     * 分裂が単なる時間稼ぎになってしまう。</p>
+     */
+    private void spawnSplits(EnemyInstance parent, Pos at) {
+        Trait trait = parent.kind().trait();
+        double hp = parent.maxHp() * 0.28;
+        int reward = Math.max(1, parent.goldReward() / 3);
+        for (int i = 0; i < trait.splitCount(); i++) {
+            Entity body = new Entity(EnemyKind.GRUNT.entityType());
+            body.setNoGravity(true);
+            body.setInstance(instance, at);
+
+            EnemyInstance child = new EnemyInstance(
+                    EnemyKind.GRUNT, body, parent.waypoints(), hp, reward);
+            // 少しずらして出すと重なって 1 体に見えるのを防げる
+            child.advanceTo(Math.max(0.0, parent.travelled() - 0.9 * i));
+            enemies.add(child);
+        }
+        Overlay.drawBurst(players, at.withY(at.y() + 0.8), Particle.ITEM_SLIME, 12, 0.5f);
     }
 
     /** 金脈ルーンの近くで倒したときの追加報酬。 */
@@ -536,6 +652,12 @@ public abstract class Battlefield {
                 : base.cooldown();
         double slow = base.slowFactor() > 0 ? Math.min(0.85, base.slowFactor() + mods.slowBonus()) : 0.0;
 
+        // 監視塔からの上乗せ
+        damage *= 1.0 + tower.boostDamage();
+        if (tower.boostRate() > 0) {
+            cooldown = Math.max(2, (int) Math.round(cooldown * (1.0 - tower.boostRate())));
+        }
+
         return new TowerKind.Stats(
                 damage,
                 range,
@@ -545,7 +667,41 @@ public abstract class Battlefield {
                 slow,
                 base.slowTicks(),
                 base.burnDps() * mods.burnMultiplier(),
-                base.burnTicks());
+                base.burnTicks(),
+                base.effect());
+    }
+
+    /**
+     * 監視塔の効果を各タワーに焼き込む。
+     *
+     * <p>塔が増減・強化されたときだけ呼ぶ。毎 tick 周りを数え直すと
+     * 塔の数の 2 乗になるうえ、結果は塔が動かないかぎり変わらない。</p>
+     *
+     * <p>監視塔どうしは強化し合わない。並べるほど雪だるま式に伸びると、
+     * 「撃つ塔をどれだけ置くか」という肝心の配分が消えてしまう。</p>
+     */
+    protected void recomputeSupport() {
+        double rangeBonus = modifiers().rangeBonus();
+        for (TowerInstance tower : towers) {
+            if (tower.kind().passive()) {
+                tower.setBoost(0, 0);
+                continue;
+            }
+            double damage = 0;
+            double rate = 0;
+            for (TowerInstance source : towers) {
+                if (source == tower || !source.kind().passive()) {
+                    continue;
+                }
+                TowerKind.Stats stats = source.stats();
+                if (tower.distanceTo(source.centerX(), source.centerZ()) > stats.range() + rangeBonus) {
+                    continue;
+                }
+                damage += stats.effect().boostDamage();
+                rate += stats.effect().boostRate();
+            }
+            tower.setBoost(damage, Math.min(0.6, rate));
+        }
     }
 
     /**
@@ -580,9 +736,21 @@ public abstract class Battlefield {
         TowerKind.Stats stats = resolvedStats(tower);
         double range = stats.range();
 
-        if (tower.kind().style() == AttackStyle.AURA) {
-            fireAura(tower, stats, range);
-            return;
+        switch (tower.kind().style()) {
+            case AURA -> {
+                fireAura(tower, stats, range);
+                return;
+            }
+            case SUPPORT -> {
+                fireSupport(tower, stats, range);
+                return;
+            }
+            case CURSE -> {
+                fireCurse(tower, stats, range);
+                return;
+            }
+            default -> {
+            }
         }
 
         EnemyInstance target = findTarget(tower, range);
@@ -642,6 +810,14 @@ public abstract class Battlefield {
                     current = nearestUnhit(current, chainHit);
                 }
             }
+            case BANISH -> {
+                Pos targetPos = target.position();
+                spawnShot(tower, muzzle, targetPos.withY(targetPos.y() + 0.8));
+                hit(tower, target, stats, stats.damage());
+                if (target.alive()) {
+                    target.pushBack(stats.effect().knockback());
+                }
+            }
             case PIERCE -> {
                 Pos targetPos = target.position();
                 spawnShot(tower, muzzle, targetPos.withY(targetPos.y() + 0.8));
@@ -686,6 +862,36 @@ public abstract class Battlefield {
         if (shot != null) {
             shots.add(shot);
         }
+    }
+
+    /**
+     * 監視塔。敵を狙わないので、射程の輪を見せるだけ。
+     *
+     * <p>音は鳴らさない。撃っていないのに 2 秒ごとに鐘が鳴ると、
+     * どの塔が働いているのかを耳で追えなくなる。</p>
+     */
+    private void fireSupport(TowerInstance tower, TowerKind.Stats stats, double range) {
+        tower.resetCooldown(stats.cooldown());
+        Overlay.drawRangeRing(players, towerWorldX(tower), towerWorldZ(tower), range);
+    }
+
+    /** 呪詛塔。削らずに、射程内の敵の被ダメージを増やす。 */
+    private void fireCurse(TowerInstance tower, TowerKind.Stats stats, double range) {
+        Effect effect = stats.effect();
+        boolean any = false;
+        for (EnemyInstance enemy : enemies) {
+            if (!enemy.alive() || distanceFromTower(tower, enemy.position()) > range) {
+                continue;
+            }
+            enemy.applyVulnerability(effect.vulnerability(), effect.vulnerabilityTicks());
+            any = true;
+        }
+        if (!any) {
+            return;
+        }
+        tower.resetCooldown(stats.cooldown());
+        playFireSound(tower);
+        Overlay.drawRangeRing(players, towerWorldX(tower), towerWorldZ(tower), range);
     }
 
     private void fireAura(TowerInstance tower, TowerKind.Stats stats, double range) {
@@ -973,6 +1179,7 @@ public abstract class Battlefield {
         }
         arena.paintTower(tower.footprint(), kind.model());
         attachTowerLabel(tower);
+        recomputeSupport();
         playSound(SoundEvent.BLOCK_ANVIL_USE, 0.7f, 1.2f);
         return Outcome.ok(kind.displayName() + " を設置 (-" + money(kind.baseCost()) + ")");
     }
@@ -1003,6 +1210,7 @@ public abstract class Battlefield {
         }
         tower.upgrade(cost, spec);
         updateTowerLabel(tower);
+        recomputeSupport();
         playSound(SoundEvent.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.8f);
         String name = spec == null ? tower.kind().displayName()
                 : tower.kind().displayName() + "・" + spec.displayName();
@@ -1025,6 +1233,7 @@ public abstract class Battlefield {
             ownedEntities.remove(tower.label());
         }
         wallet().gain(refund);
+        recomputeSupport();
         playSound(SoundEvent.BLOCK_GLASS_BREAK, 0.7f, 1.0f);
         return Outcome.ok(tower.kind().displayName() + " を売却 (+" + money(refund) + ")");
     }

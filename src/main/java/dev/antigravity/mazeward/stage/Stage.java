@@ -133,6 +133,24 @@ public final class Stage extends Battlefield {
         }
     }
 
+    /**
+     * 終焉騎が出発点へ戻った。コア HP の上限を 1 奪われる。
+     *
+     * <p>倒しても報酬が出ず、盤面には同じ敵が残り、しかも上限だけ減る。
+     * 「削り切るまでの時間」がそのまま損失になるので、
+     * 出てきた時点で火力が足りているかどうかを問われる。</p>
+     */
+    @Override
+    protected void onEnemyRevived(EnemyInstance enemy, Pos at) {
+        run.stealMaxCoreHp(1);
+        broadcast(Component.text(enemy.kind().displayName()
+                + " は倒れずに出発点へ戻った  コアHP上限 -1 (上限 "
+                + run.maxCoreHp() + ")", NamedTextColor.DARK_PURPLE));
+        if (run.coreDestroyed()) {
+            finish(false);
+        }
+    }
+
     @Override
     protected void onDispose() {
         spawnSchedule.clear();

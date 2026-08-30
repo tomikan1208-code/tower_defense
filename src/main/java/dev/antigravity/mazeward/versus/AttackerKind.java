@@ -23,8 +23,14 @@ import net.minestom.server.item.Material;
  * 「新しい脅威を解禁する」ことになるので、
  * 「守りを固めるか、収入を伸ばすか」の選択がそのまま戦略の分岐になる。
  *
- * <h2>ボスはインカムを生まない</h2>
+ * <h2>ボスと終焉騎はインカムを生まない</h2>
  * 終盤に「もう伸ばさずに削り切る」へ切り替える判断を作るため。
+ *
+ * <h2>解禁順に意味がある</h2>
+ * 安い順に並べているのではなく、<b>相手の防衛が固まっていく順に、
+ * その固め方を咎めるものが出てくる</b>ように並べてある。
+ * 妨害者はキルゾーンの集中を、瞬移体は 1 点集中を、分裂体は単体火力を、
+ * 熱塊は炎氷偏重を、庇護者は火力の総量を、それぞれ咎める。
  */
 public enum AttackerKind {
 
@@ -34,14 +40,33 @@ public enum AttackerKind {
     DASHER("疾走者", EnemyKind.RUNNER, 25, 1, 1, 15, 30,
             Material.FEATHER, "速い。キルゾーンを走り抜ける"),
 
+    SAPPER("妨害者", EnemyKind.SAPPER, 40, 2, 2, 30, 70,
+            Material.GUNPOWDER, "通り道のタワーを 3 秒黙らせる。火力を固めた相手ほど痛い"),
+
     STONEBACK("石背", EnemyKind.BRUTE, 45, 2, 2, 40, 170,
             Material.IRON_INGOT, "固定装甲。手数だけの防衛を咎める"),
 
     SKIMMER("浮遊蟲", EnemyKind.FLYER, 60, 2, 2, 70, 95,
             Material.PHANTOM_MEMBRANE, "迷路を無視して直線で飛ぶ。対空のない相手に刺さる"),
 
+    PHASER("瞬移体", EnemyKind.BLINKER, 70, 2, 2, 90, 110,
+            Material.ENDER_EYE, "撃たれるたび前へ飛ぶ。1 箇所に固めたキルゾーンを跳び越える"),
+
     CHANTER("祈祷師", EnemyKind.HEALER, 80, 3, 2, 110, 130,
             Material.GOLDEN_APPLE, "周囲を回復し続ける。単体火力だけでは倒しきれない"),
+
+    CLEAVER("分裂体", EnemyKind.SPLITTER, 95, 3, 3, 140, 150,
+            Material.SLIME_BALL, "倒すとその場で 2 体に分かれる。単体火力だけの防衛を咎める"),
+
+    CINDER("熱塊", EnemyKind.EMBERLING, 120, 3, 3, 180, 175,
+            Material.BLAZE_POWDER, "燃えず、減速も効かない。炎と氷に寄せた防衛を咎める"),
+
+    BULWARK("庇護者", EnemyKind.AEGIS, 150, 4, 3, 230, 260,
+            Material.SHIELD, "周りの味方の被ダメージを 35% 減らす。数を並べただけでは溶けない"),
+
+    REAPER("終焉騎", EnemyKind.REAPER, 260, 0, 4, 300, 420,
+            Material.NETHERITE_SCRAP,
+            "一度目に倒れても出発点へ戻り、相手のライフ上限を 1 奪う。インカムは増えない"),
 
     CALAMITY("災厄", EnemyKind.BOSS, 400, 0, 5, 350, 2200,
             Material.WITHER_SKELETON_SKULL, "インカムは増えない。削り切るための最終手段");

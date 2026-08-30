@@ -41,7 +41,13 @@ public final class PlayerSession {
      */
     public static final int PALETTE_SLOTS = 6;
 
-    /** 障害物 ⇄ タワーの切り替え。 */
+    /**
+     * 障害物 ⇄ タワーの切り替え。
+     *
+     * <p>タワーが 6 種を超えたのでページ送りも兼ねる。押すたびに
+     * 障害物 → タワー前半 → タワー後半 → 障害物 … と一巡する。
+     * 別のキーを増やすより、<b>押すところが 1 つ</b> のほうが覚えることが少ない。</p>
+     */
     public static final int SLOT_TOGGLE = 6;
 
     public static final int SLOT_INSPECT = 7;
@@ -73,6 +79,7 @@ public final class PlayerSession {
     private Sidebar sidebar;
 
     private HandMode handMode = HandMode.OBSTACLE;
+    private int towerPage;
     private Mode mode = Mode.NONE;
     private int cardIndex = -1;
     private TowerKind towerKind;
@@ -125,9 +132,41 @@ public final class PlayerSession {
         return handMode;
     }
 
-    /** 障害物とタワーを切り替える。選択は解除して、持ち替え直してもらう。 */
+    public int towerPage() {
+        return towerPage;
+    }
+
+    /** いま置けるタワーのうち、パレットに並ぶぶんだけ。 */
+    public List<TowerKind> palette() {
+        if (field == null || handMode != HandMode.TOWER) {
+            return List.of();
+        }
+        List<TowerKind> towers = field.availableTowers();
+        int from = Math.min(towers.size(), towerPage * PALETTE_SLOTS);
+        int to = Math.min(towers.size(), from + PALETTE_SLOTS);
+        return towers.subList(from, to);
+    }
+
+    /** タワーがあと 1 ページぶん残っているか。切り替えアイテムの表示に使う。 */
+    public boolean hasNextTowerPage() {
+        return field != null && handMode == HandMode.TOWER
+                && (towerPage + 1) * PALETTE_SLOTS < field.availableTowers().size();
+    }
+
+    /**
+     * 障害物 → タワー（ページ順）→ 障害物 と一巡する。
+     * 選択は解除して、持ち替え直してもらう。
+     */
     public void toggleHandMode() {
-        handMode = handMode == HandMode.OBSTACLE ? HandMode.TOWER : HandMode.OBSTACLE;
+        if (handMode == HandMode.OBSTACLE) {
+            handMode = HandMode.TOWER;
+            towerPage = 0;
+        } else if (hasNextTowerPage()) {
+            towerPage++;
+        } else {
+            handMode = HandMode.OBSTACLE;
+            towerPage = 0;
+        }
         clearSelection();
     }
 
@@ -471,7 +510,7 @@ public final class PlayerSession {
         }
 
         if (handMode == HandMode.TOWER) {
-            var towers = field.availableTowers();
+            List<TowerKind> towers = palette();
             if (slot < towers.size()) {
                 if (mode != Mode.TOWER || towerKind != towers.get(slot)) {
                     selectTower(towers.get(slot));

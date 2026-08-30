@@ -112,6 +112,20 @@ public final class Island extends Battlefield {
         match.onLifeLost(owner);
     }
 
+    /**
+     * 終焉騎が出発点へ戻った。ライフ上限を 1 奪われる。
+     *
+     * <p>これだけが取り返しのつかない削り方なので、全員に見えるように告知する。
+     * 「誰がもう後がないか」は送り先を決める最大の材料になる。</p>
+     */
+    @Override
+    protected void onEnemyRevived(EnemyInstance enemy, Pos at) {
+        owner.stealMaxLife(1);
+        broadcast(Component.text(owner.name() + " のライフ上限 -1（残り "
+                + owner.lives() + "/" + owner.maxLives() + "）", NamedTextColor.DARK_PURPLE));
+        match.onLifeLost(owner);
+    }
+
     // ================================================================ 送りの受け取り
 
     /** 送られてきたモンスターをこの島に 1 体湧かせる。 */

@@ -86,7 +86,48 @@ public enum TowerKind {
             new Spec("長距離", "射程がさらに 8 伸びる。盤面のどこへでも届く",
                     1.0, 8.0, 1.0, 0, 0, 0, 0),
             new Spec("貫通強化", "貫く数が 3 体増え、威力も上がる",
-                    1.2, 0, 1.0, 0, 3, 0, 0));
+                    1.2, 0, 1.0, 0, 3, 0, 0)),
+
+    // ---------------------------------------------------------------- 支援・妨害
+
+    BANISHER(
+            "送還塔", "敵を来た道へ押し戻す。削る力は無いが、キルゾーンを何度も通させる。",
+            Shapes.DOT, Material.ENDER_PEARL, Block.PURPUR_PILLAR,
+            Element.VOID, AttackStyle.BANISH,
+            75, 5.5, 55, 5.0,
+            0.0, 0, 0.0, 0, 0.0, 0,
+            SoundEvent.ENTITY_ENDERMAN_TELEPORT, 1.2f, Material.ENDER_PEARL, 0.6f,
+            Effect.banish(4.0),
+            new Spec("深淵送り", "押し戻す距離が 2 倍以上になる",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.banish(5.0)),
+            new Spec("連続送還", "攻撃間隔が半分になる。押し戻す距離は変わらない",
+                    1.0, 0, 0.5, 0, 0, 0, 0)),
+
+    HEXER(
+            "呪詛塔", "射程内の敵の守りを剥ぐ。自分は削らないが、周りの塔の火力が伸びる。",
+            Shapes.I2, Material.DRAGON_BREATH, Block.CRYING_OBSIDIAN,
+            Element.HEX, AttackStyle.CURSE,
+            95, 6.0, 30, 0.0,
+            0.0, 0, 0.0, 0, 0.0, 0,
+            SoundEvent.ENTITY_WITCH_AMBIENT, 1.1f, null, 0f,
+            Effect.curse(0.35, 60),
+            new Spec("深き呪い", "被ダメージ増加が 2 倍近くになる",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.curse(0.30, 0)),
+            new Spec("広域呪詛", "射程が大きく広がる。盤面の大半を呪える",
+                    1.0, 5.0, 1.0, 0, 0, 0, 0)),
+
+    WATCHTOWER(
+            "監視塔", "周りのタワーの威力と手数を上げる。自分は撃たない。",
+            Shapes.O, Material.BELL, Block.LODESTONE,
+            Element.NONE, AttackStyle.SUPPORT,
+            120, 5.0, 40, 0.0,
+            0.0, 0, 0.0, 0, 0.0, 0,
+            SoundEvent.BLOCK_BELL_USE, 1.4f, null, 0f,
+            Effect.watch(0.30, 0.15),
+            new Spec("号令", "威力の上乗せが 2 倍になる",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0.30, 0)),
+            new Spec("展望", "射程が伸び、手数の上乗せが厚くなる",
+                    1.0, 4.0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0, 0.15)));
 
     public static final int MAX_LEVEL = 3;
 
@@ -111,6 +152,7 @@ public enum TowerKind {
     private final float firePitch;
     private final Material projectile;
     private final float projectileScale;
+    private final Effect effect;
     private final Spec specA;
     private final Spec specB;
 
@@ -122,6 +164,20 @@ public enum TowerKind {
               SoundEvent fireSound, float firePitch,
               Material projectile, float projectileScale,
               Spec specA, Spec specB) {
+        this(displayName, description, shape, icon, model, element, style,
+                baseCost, baseRange, baseCooldown, baseDamage, splashRadius, chainTargets,
+                slowFactor, slowTicks, burnDps, burnTicks, fireSound, firePitch,
+                projectile, projectileScale, Effect.NONE, specA, specB);
+    }
+
+    TowerKind(String displayName, String description, Shape shape, Material icon, Block model,
+              Element element, AttackStyle style,
+              int baseCost, double baseRange, int baseCooldown, double baseDamage,
+              double splashRadius, int chainTargets,
+              double slowFactor, int slowTicks, double burnDps, int burnTicks,
+              SoundEvent fireSound, float firePitch,
+              Material projectile, float projectileScale,
+              Effect effect, Spec specA, Spec specB) {
         this.displayName = displayName;
         this.description = description;
         this.shape = shape;
@@ -143,8 +199,19 @@ public enum TowerKind {
         this.firePitch = firePitch;
         this.projectile = projectile;
         this.projectileScale = projectileScale;
+        this.effect = effect;
         this.specA = specA;
         this.specB = specB;
+    }
+
+    /** ダメージ以外の効果（送還・呪詛・支援）。持たない塔は {@link Effect#NONE}。 */
+    public Effect effect() {
+        return effect;
+    }
+
+    /** 敵を狙わない塔か。狙う相手がいなくても働くので、射撃処理を通さない。 */
+    public boolean passive() {
+        return style == AttackStyle.SUPPORT;
     }
 
     /** 最終段階で選べる 2 つの特化。 */
@@ -221,13 +288,21 @@ public enum TowerKind {
     public record Spec(String displayName, String description,
                        double damageMul, double rangeAdd, double cooldownMul,
                        double splashAdd, int chainAdd, double slowAdd,
-                       double burnAdd, double burnMul) {
+                       double burnAdd, double burnMul, Effect effectAdd) {
 
         public Spec(String displayName, String description,
                     double damageMul, double rangeAdd, double cooldownMul,
                     double splashAdd, int chainAdd, double slowAdd, double burnAdd) {
             this(displayName, description, damageMul, rangeAdd, cooldownMul,
-                    splashAdd, chainAdd, slowAdd, burnAdd, 1.0);
+                    splashAdd, chainAdd, slowAdd, burnAdd, 1.0, Effect.NONE);
+        }
+
+        public Spec(String displayName, String description,
+                    double damageMul, double rangeAdd, double cooldownMul,
+                    double splashAdd, int chainAdd, double slowAdd,
+                    double burnAdd, double burnMul) {
+            this(displayName, description, damageMul, rangeAdd, cooldownMul,
+                    splashAdd, chainAdd, slowAdd, burnAdd, burnMul, Effect.NONE);
         }
     }
 
@@ -250,6 +325,13 @@ public enum TowerKind {
         double slow = slowFactor > 0 ? Math.min(0.75, slowFactor + 0.05 * level) : 0.0;
         double burn = burnDps * levelMul;
         int burnFor = burnTicks;
+        // 支援・妨害の効果もレベルで伸びる。伸びなければ強化する意味がない
+        Effect resolved = effect.empty() ? effect : new Effect(
+                effect.knockback() * levelMul,
+                effect.vulnerability() * levelMul,
+                effect.vulnerabilityTicks(),
+                effect.boostDamage() * levelMul,
+                effect.boostRate() * levelMul);
 
         if (spec != null) {
             damage *= spec.damageMul();
@@ -262,9 +344,11 @@ public enum TowerKind {
             if (burn > 0 && burnFor <= 0) {
                 burnFor = 60;
             }
+            resolved = resolved.plus(spec.effectAdd());
         }
 
-        return new Stats(damage, range, cooldown, splash, chain, slow, slowTicks, burn, burnFor);
+        return new Stats(damage, range, cooldown, splash, chain, slow, slowTicks,
+                burn, burnFor, resolved);
     }
 
     /**
@@ -279,7 +363,15 @@ public enum TowerKind {
             double slowFactor,
             int slowTicks,
             double burnDps,
-            int burnTicks) {
+            int burnTicks,
+            Effect effect) {
+
+        public Stats(double damage, double range, int cooldown, double splashRadius,
+                     int chainTargets, double slowFactor, int slowTicks,
+                     double burnDps, int burnTicks) {
+            this(damage, range, cooldown, splashRadius, chainTargets, slowFactor,
+                    slowTicks, burnDps, burnTicks, Effect.NONE);
+        }
 
         public double dps() {
             return damage * 20.0 / Math.max(1, cooldown);

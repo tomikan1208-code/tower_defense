@@ -544,11 +544,20 @@ public final class CombatSim {
         return false;
     }
 
+    /**
+     * 何を建てるか。
+     *
+     * <p>人間ほど上手くはないが、<b>支援・妨害の塔も必ず建つ</b> ようにしてある。
+     * 建たないと、その塔の射撃処理がヘッドレス検証を一度も通らない。</p>
+     */
     private static TowerKind pickTower(Stage stage, RunState run, int placedSoFar) {
         int existing = stage.towers().size();
-        // 5 基に 1 基は減速、9 基に 1 基は範囲。あとは数を並べる。
+        // 5 基に 1 基は減速、9 基に 1 基は範囲、11・13 基ごとに支援と妨害。あとは数を並べる。
         TowerKind preferred = existing % 5 == 4 ? TowerKind.FROST
                 : existing % 9 == 8 ? TowerKind.CANNON
+                : existing % 11 == 10 ? TowerKind.WATCHTOWER
+                : existing % 13 == 12 ? TowerKind.HEXER
+                : existing % 17 == 16 ? TowerKind.BANISHER
                 : TowerKind.ARROW;
         if (run.isUnlocked(preferred) && run.gold() >= preferred.baseCost()) {
             return preferred;

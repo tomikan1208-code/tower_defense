@@ -8,6 +8,9 @@ import dev.antigravity.mazeward.core.Rot;
 import dev.antigravity.mazeward.core.Shape;
 import dev.antigravity.mazeward.core.Shapes;
 import dev.antigravity.mazeward.core.Vec2i;
+import dev.antigravity.mazeward.enemy.EnemyInstance;
+import dev.antigravity.mazeward.enemy.EnemyKind;
+import dev.antigravity.mazeward.enemy.Trait;
 import dev.antigravity.mazeward.run.BlockCard;
 import dev.antigravity.mazeward.run.Deck;
 import dev.antigravity.mazeward.run.Roadmap;
@@ -20,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import net.minestom.server.coordinate.Pos;
 
 /**
  * Minecraft クライアントなしで純粋ロジックを検証するヘッドレスチェック。
@@ -41,6 +45,7 @@ public final class SelfCheck {
         checkPathDeterminism();
         checkBlockingRule();
         checkTowerSpecs();
+        checkAbilities();
         checkCardMaterials();
         checkRoadmapGraph();
         checkGeneration();
@@ -386,8 +391,9 @@ public final class SelfCheck {
             assertTrue(!a.equals(b), kind + " の 2 つの特化が同じ性能になっている");
             assertTrue(!a.equals(plain) && !b.equals(plain),
                     kind + " の特化が無印と変わっていない");
-            assertTrue(a.damage() > 0 || a.burnDps() > 0, kind + " の特化 A に攻撃手段がない");
-            assertTrue(b.damage() > 0 || b.burnDps() > 0, kind + " の特化 B に攻撃手段がない");
+            // 支援・妨害の塔は自分では削らない。「何もしない塔」でないことだけ確かめる
+            assertTrue(contributes(a), kind + " の特化 A が何もしない");
+            assertTrue(contributes(b), kind + " の特化 B が何もしない");
             assertTrue(a.cooldown() >= 2 && b.cooldown() >= 2, kind + " の攻撃間隔が短すぎる");
             assertTrue(a.chainTargets() >= 1 && b.chainTargets() >= 1,
                     kind + " の対象数が 0 以下になっている");
@@ -697,6 +703,159 @@ public final class SelfCheck {
     private static void section(String name) {
         System.out.println();
         System.out.println("== " + name + " ==");
+    }
+
+    /** その性能で盤面に何か起きるか。削るか、減速するか、燃やすか、送還・呪詛・支援するか。 */
+    private static boolean contributes(TowerKind.Stats stats) {
+        return stats.damage() > 0 || stats.burnDps() > 0 || stats.slowFactor() > 0
+                || !stats.effect().empty();
+    }
+
+    /**
+     * 能力持ちの敵とその対策塔が噛み合っているか。
+     *
+     * <p>数値を触ったときに「対策のつもりの塔が実は効かない」状態を作らないための番人。
+     * ゲームとして成立するかどうかは、この対応関係が生きているかにかかっている。</p>
+     */
+    private static void checkAbilities() {
+        section("能力持ちの敵と対策塔");
+
+        int withTrait = 0;
+        for (EnemyKind kind : EnemyKind.values()) {
+            Trait trait = kind.trait();
+            if (trait.equals(Trait.NONE)) {
+                continue;
+            }
+            withTrait++;
+            assertTrue(trait.disableRadius() >= 0 && trait.wardReduction() <= 1.0
+                            && trait.burnResist() <= 1.0,
+                    kind + " の能力の値が範囲外");
+        }
+        assertTrue(withTrait == 6, "能力持ちの敵が 6 種ではない（" + withTrait + " 種）");
+
+        // 熱塊は燃えない・凍らない。炎氷偏重を咎める役なので、両方効かないことが要る
+        Trait ember = EnemyKind.EMBERLING.trait();
+        assertTrue(ember.burnResist() >= 1.0, "熱塊が燃焼耐性を持っていない");
+        assertTrue(EnemyKind.EMBERLING.slowResist() >= 1.0, "熱塊が減速耐性を持っていない");
+
+        // 終焉騎は戻れる回数を持つ。0 だとただの硬い敵になる
+        assertTrue(EnemyKind.REAPER.trait().hasRevive(), "終焉騎が復活回数を持っていない");
+
+        // 呪詛は庇護を上回れないと「庇護者が出たら詰み」になる
+        double curse = TowerKind.HEXER.statsAt(TowerKind.MAX_LEVEL).effect().vulnerability();
+        double ward = EnemyKind.AEGIS.trait().wardReduction();
+        assertTrue(curse > ward,
+                "呪詛(" + String.format("%.2f", curse) + ") が庇護("
+                        + String.format("%.2f", ward) + ") を上回っていない");
+
+        // 送還は「押し戻す」効果なので、敵が 1 秒で進む距離より大きくないと意味がない
+        double knockback = TowerKind.BANISHER.statsAt(0).effect().knockback();
+        double perSecond = EnemyKind.GRUNT.baseSpeed() * 20.0;
+        assertTrue(knockback > perSecond,
+                "送還の押し戻し(" + knockback + ") が徘徊者の 1 秒ぶん("
+                        + String.format("%.2f", perSecond) + ") 以下");
+
+        // 監視塔は自分では撃たない
+        assertTrue(TowerKind.WATCHTOWER.passive(), "監視塔が支援扱いになっていない");
+        assertTrue(TowerKind.WATCHTOWER.statsAt(0).effect().boostDamage() > 0,
+                "監視塔に強化効果がない");
+
+        System.out.printf("  能力持ち %d 種 / 呪詛 +%.0f%% > 庇護 -%.0f%% / 送還 %.1f ブロック%n",
+                withTrait, curse * 100, ward * 100, knockback);
+
+        checkDamagePipeline();
+        checkRevive();
+        checkPushBack();
+    }
+
+    /**
+     * 装甲 → 呪詛 → 庇護 の順にダメージが通るか。
+     *
+     * <p>ここは対戦の駆け引きが全部乗っている計算なので、
+     * 順番が入れ替わっただけで「呪詛が効かない」「庇護が固すぎる」に化ける。
+     * シミュレーションでは気付けないため、値を直接確かめる。</p>
+     */
+    private static void checkDamagePipeline() {
+        // 装甲 0 の敵に素の 100 ダメージ
+        double plain = fresh(EnemyKind.GRUNT).damage(100);
+        assertTrue(Math.abs(plain - 100) < 1e-6, "素のダメージが 100 にならない: " + plain);
+
+        // 装甲は固定引き算
+        double armored = fresh(EnemyKind.BRUTE).damage(100);
+        assertTrue(Math.abs(armored - (100 - EnemyKind.BRUTE.armor())) < 1e-6,
+                "装甲の引き算が合わない: " + armored);
+
+        // 呪詛は装甲を引いたあとに掛かる
+        EnemyInstance cursed = fresh(EnemyKind.BRUTE);
+        cursed.applyVulnerability(0.5, 40);
+        double withCurse = cursed.damage(100);
+        assertTrue(Math.abs(withCurse - (100 - EnemyKind.BRUTE.armor()) * 1.5) < 1e-6,
+                "呪詛が装甲のあとに掛かっていない: " + withCurse);
+
+        // 庇護は最後に掛かる
+        EnemyInstance warded = fresh(EnemyKind.GRUNT);
+        warded.applyWard(0.35, 40);
+        double withWard = warded.damage(100);
+        assertTrue(Math.abs(withWard - 65) < 1e-6, "庇護の軽減が合わない: " + withWard);
+
+        // 呪詛は庇護を打ち消せる。ここが崩れると「庇護者が出たら詰み」になる
+        EnemyInstance both = fresh(EnemyKind.GRUNT);
+        both.applyWard(0.35, 40);
+        both.applyVulnerability(0.93, 40);
+        double net = both.damage(100);
+        assertTrue(net > 100, "最大の呪詛が庇護を上回れていない: " + net);
+
+        // 熱塊は燃えない
+        EnemyInstance ember = fresh(EnemyKind.EMBERLING);
+        ember.applyBurn(50, 40);
+        assertTrue(!ember.burning(), "熱塊が燃えている");
+
+        System.out.printf("  ダメージ計算: 素 %.0f / 装甲 %.0f / 呪詛 %.0f / 庇護 %.0f / 呪詛+庇護 %.0f%n",
+                plain, armored, withCurse, withWard, net);
+    }
+
+    /** 終焉騎は一度だけ出発点へ戻り、二度目はきちんと倒れる。 */
+    private static void checkRevive() {
+        EnemyInstance reaper = fresh(EnemyKind.REAPER);
+        reaper.advanceTo(5.0);
+        reaper.damageDirect(10_000);
+        assertTrue(!reaper.alive(), "終焉騎が倒れていない");
+
+        assertTrue(reaper.tryRevive(), "終焉騎が一度も戻らない");
+        assertTrue(reaper.alive(), "戻ったのに生きていない");
+        assertTrue(reaper.travelled() == 0.0, "戻ったのに出発点にいない");
+        assertTrue(Math.abs(reaper.hp() - reaper.maxHp()) < 1e-6, "戻ったのに全快していない");
+
+        reaper.damageDirect(10_000);
+        assertTrue(!reaper.tryRevive(), "終焉騎が二度も戻ってしまう");
+
+        // 能力を持たない敵は絶対に戻らない
+        EnemyInstance grunt = fresh(EnemyKind.GRUNT);
+        grunt.damageDirect(10_000);
+        assertTrue(!grunt.tryRevive(), "徘徊者が復活してしまう");
+
+        System.out.println("  終焉騎: 1 回だけ出発点へ戻り、2 回目は倒れる");
+    }
+
+    /** 送還は経路を戻すが、出発点より手前へは戻らない。 */
+    private static void checkPushBack() {
+        EnemyInstance enemy = fresh(EnemyKind.GRUNT);
+        enemy.advanceTo(6.0);
+        assertTrue(enemy.pushBack(4.0), "送還が効かない");
+        assertTrue(Math.abs(enemy.travelled() - 2.0) < 1e-6,
+                "送還の戻し幅が合わない: " + enemy.travelled());
+
+        enemy.pushBack(100);
+        assertTrue(enemy.travelled() == 0.0, "出発点より手前へ戻っている");
+        assertTrue(!enemy.pushBack(4.0), "出発点にいるのに送還が成立している");
+
+        System.out.println("  送還: 経路を戻すが、出発点より手前へは行かない");
+    }
+
+    /** 直線 1 本の経路を持つ検証用の個体。エンティティは使わないので null でよい。 */
+    private static EnemyInstance fresh(EnemyKind kind) {
+        return new EnemyInstance(kind, null,
+                List.of(new Pos(0, 65, 0), new Pos(20, 65, 0)), 5000, 1);
     }
 
     private static void assertTrue(boolean condition, String message) {

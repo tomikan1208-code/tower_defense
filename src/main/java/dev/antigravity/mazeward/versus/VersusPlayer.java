@@ -59,6 +59,8 @@ public final class VersusPlayer {
     private int coins = START_COINS;
     private int income = START_INCOME;
     private int lives = START_LIVES;
+    /** 終焉騎に奪われると減る。回復手段はない。 */
+    private int maxLives = START_LIVES;
     private int stock = MAX_STOCK;
     private Island island;
 
@@ -125,6 +127,10 @@ public final class VersusPlayer {
         return lives;
     }
 
+    public int maxLives() {
+        return maxLives;
+    }
+
     public int stock() {
         return stock;
     }
@@ -173,5 +179,17 @@ public final class VersusPlayer {
     /** ライフを削られた。0 になったら脱落。 */
     public void loseLife(int amount) {
         lives = Math.max(0, lives - amount);
+    }
+
+    /**
+     * ライフの上限を恒久的に奪われる（終焉騎）。
+     *
+     * <p>普通の漏れと違って取り返しがつかない。
+     * 「倒しさえすれば損はない」を崩すための唯一の手段なので、
+     * 現在ライフも一緒に減らす。</p>
+     */
+    public void stealMaxLife(int amount) {
+        maxLives = Math.max(0, maxLives - amount);
+        lives = Math.min(lives, maxLives);
     }
 }

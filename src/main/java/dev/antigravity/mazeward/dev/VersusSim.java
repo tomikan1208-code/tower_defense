@@ -14,6 +14,8 @@ import dev.antigravity.mazeward.versus.Island;
 import dev.antigravity.mazeward.versus.VersusMatch;
 import dev.antigravity.mazeward.versus.VersusPlayer;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Random;
 import net.minestom.server.MinecraftServer;
@@ -83,6 +85,7 @@ public final class VersusSim {
         int builds = 0;
         int sends = 0;
         int guard = 0;
+        Map<AttackerKind, Integer> sentByKind = new EnumMap<>(AttackerKind.class);
         while (!ended[0] && guard++ < 20 * 60 * 25) {
             match.tick();
 
@@ -96,8 +99,13 @@ public final class VersusSim {
             }
             if (guard % 100 == 0 && !match.preparing()) {
                 for (VersusPlayer participant : everyone) {
-                    if (participant.alive() && sendSomething(match, participant)) {
+                    if (!participant.alive()) {
+                        continue;
+                    }
+                    AttackerKind sent = sendSomething(match, participant);
+                    if (sent != null) {
                         sends++;
+                        sentByKind.merge(sent, 1, Integer::sum);
                     }
                 }
             }
@@ -114,6 +122,8 @@ public final class VersusSim {
                     participant.name(), participant.lives(), participant.coins(),
                     participant.income(), island.towers().size(), island.totalPathLength());
         }
+        reportSends(sentByKind);
+        reportSteals(everyone);
         check(ended[0], "試合が終わらなかった（決着がつかない）");
         System.out.println("  勝者: " + (winner[0] == null ? "引き分け" : winner[0].name()));
 
@@ -216,17 +226,46 @@ public final class VersusSim {
         return placed;
     }
 
+    /**
+     * 送られた内訳。
+     *
+     * <p>能力持ちが一度も送られていないと、その戦闘処理（無力化・瞬移・分裂・庇護・復活）が
+     * 検証を素通りしてしまう。決着したかどうかだけでなく、
+     * <b>何が実際に走ったか</b> を出しておく。</p>
+     */
+    private static void reportSends(Map<AttackerKind, Integer> sentByKind) {
+        StringBuilder line = new StringBuilder("  送りの内訳: ");
+        for (AttackerKind kind : AttackerKind.values()) {
+            int count = sentByKind.getOrDefault(kind, 0);
+            if (count > 0) {
+                line.append(kind.displayName()).append(' ').append(count).append("  ");
+            }
+        }
+        System.out.println(line.toString().stripTrailing());
+    }
+
+    /** 終焉騎に上限を奪われた人がいるか。復活処理が実際に走ったかの確認になる。 */
+    private static void reportSteals(List<VersusPlayer> everyone) {
+        int stolen = 0;
+        for (VersusPlayer participant : everyone) {
+            stolen += VersusPlayer.START_LIVES - participant.maxLives();
+        }
+        if (stolen > 0) {
+            System.out.println("  終焉騎に奪われたライフ上限: 合計 " + stolen);
+        }
+    }
+
     /** 送れるもののうち、いちばん高いものを送る（インカムを伸ばす動き）。 */
-    private static boolean sendSomething(VersusMatch match, VersusPlayer participant) {
+    private static AttackerKind sendSomething(VersusMatch match, VersusPlayer participant) {
         List<AttackerKind> options = AttackerKind.unlockedAt(participant.income());
         for (int i = options.size() - 1; i >= 0; i--) {
             AttackerKind kind = options.get(i);
             if (participant.canSend(kind)) {
                 match.send(participant, kind);
-                return true;
+                return kind;
             }
         }
-        return false;
+        return null;
     }
 
     private static void check(boolean condition, String message) {

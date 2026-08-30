@@ -147,6 +147,18 @@ public final class RunState implements Modifiers {
         coreHp = Math.min(maxCoreHp, coreHp + amount);
     }
 
+    /**
+     * コア HP の上限を恒久的に奪われる（終焉騎）。
+     *
+     * <p>回復では戻らない。「倒したのに損をした」という状態を残すのが目的なので、
+     * 現在 HP も一緒に減らす。ただし 1 は残す——ここで即死させると、
+     * 倒しきれなかったこと自体が敗北になり、判断の余地がなくなる。</p>
+     */
+    public void stealMaxCoreHp(int amount) {
+        maxCoreHp = Math.max(1, maxCoreHp - amount);
+        coreHp = Math.min(coreHp, maxCoreHp);
+    }
+
     public void raiseMaxCoreHp(int amount) {
         maxCoreHp += amount;
         coreHp += amount;

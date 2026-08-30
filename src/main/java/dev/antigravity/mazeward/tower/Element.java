@@ -8,7 +8,9 @@ public enum Element {
     NONE("無", NamedTextColor.WHITE),
     FIRE("炎", NamedTextColor.RED),
     ICE("氷", NamedTextColor.AQUA),
-    ARC("電", NamedTextColor.YELLOW);
+    ARC("電", NamedTextColor.YELLOW),
+    VOID("虚", NamedTextColor.DARK_PURPLE),
+    HEX("呪", NamedTextColor.LIGHT_PURPLE);
 
     private final String displayName;
     private final TextColor color;

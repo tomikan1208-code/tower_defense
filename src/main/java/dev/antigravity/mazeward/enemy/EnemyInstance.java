@@ -36,6 +36,23 @@ public final class EnemyInstance {
     private int nameTimer;
     private boolean leaked;
 
+    /** 呪詛による被ダメージ増加。 */
+    private double vulnerability;
+    private int vulnerableTicks;
+
+    /** 庇護オーラによる被ダメージ軽減。毎オーラ tick で貼り直される。 */
+    private double ward;
+    private int wardTicks;
+
+    /** 瞬移体が続けて飛ばないようにする間隔。 */
+    private int blinkCooldown;
+
+    /** 見せ場（瞬移・送還・復活）が起きたことを戦場側へ伝えるフラグ。 */
+    private boolean blinked;
+    private boolean banished;
+
+    private int revivesLeft;
+
     // 1 発ごとに数字を出すとエンティティが溢れるので、少しの間ぶんを足し合わせてから出す
     private double pendingDamage;
     private TextColor pendingColor;
@@ -46,6 +63,7 @@ public final class EnemyInstance {
         this.maxHp = maxHp;
         this.hp = maxHp;
         this.goldReward = goldReward;
+        this.revivesLeft = kind.trait().revives();
         applyWaypoints(waypoints);
     }
 
@@ -77,6 +95,16 @@ public final class EnemyInstance {
 
     public EnemyKind kind() {
         return kind;
+    }
+
+    /** いま辿っている折れ線。分裂した子に同じ経路を渡すのに使う。 */
+    public List<Pos> waypoints() {
+        return waypoints;
+    }
+
+    /** 経路上の任意の位置へ移す。分裂の子を親の位置から歩かせるのに使う。 */
+    public void advanceTo(double distance) {
+        progress = Math.max(0.0, Math.min(totalLength, distance));
     }
 
     public Entity body() {
@@ -140,11 +168,90 @@ public final class EnemyInstance {
     }
 
     public void applyBurn(double dps, int ticks) {
-        if (dps <= 0.0) {
+        double effective = dps * (1.0 - kind.trait().burnResist());
+        if (effective <= 0.0) {
             return;
         }
-        burnDps = Math.max(burnDps, dps);
+        burnDps = Math.max(burnDps, effective);
         burnTicks = Math.max(burnTicks, ticks);
+    }
+
+    /** 呪詛。被ダメージが増える。深いほうを優先し、持続は長いほうを取る。 */
+    public void applyVulnerability(double amount, int ticks) {
+        if (amount <= 0.0) {
+            return;
+        }
+        vulnerability = Math.max(vulnerability, amount);
+        vulnerableTicks = Math.max(vulnerableTicks, ticks);
+    }
+
+    /**
+     * 庇護オーラ。
+     *
+     * <p>毎回上書きするのではなく期限つきで貼る。庇護者が倒れた瞬間に
+     * 軽減が消えないと「庇護者から狙う」という判断が成立しないので、
+     * 持続はオーラの更新間隔ぶんだけにしてある。</p>
+     */
+    public void applyWard(double reduction, int ticks) {
+        if (reduction <= 0.0) {
+            return;
+        }
+        ward = Math.max(ward, reduction);
+        wardTicks = Math.max(wardTicks, ticks);
+    }
+
+    public boolean warded() {
+        return wardTicks > 0 && ward > 0.0;
+    }
+
+    public boolean vulnerable() {
+        return vulnerableTicks > 0 && vulnerability > 0.0;
+    }
+
+    /**
+     * 経路を戻す（送還塔）。
+     *
+     * <p>倒すのではなく <b>もう一度キルゾーンを通させる</b> ための効果。
+     * 出発点より手前へは戻さない。</p>
+     */
+    public boolean pushBack(double distance) {
+        if (distance <= 0.0 || progress <= 0.0) {
+            return false;
+        }
+        progress = Math.max(0.0, progress - distance);
+        banished = true;
+        return true;
+    }
+
+    public boolean consumeBlinked() {
+        boolean value = blinked;
+        blinked = false;
+        return value;
+    }
+
+    public boolean consumeBanished() {
+        boolean value = banished;
+        banished = false;
+        return value;
+    }
+
+    /**
+     * 倒れる代わりに出発点へ戻れるなら戻る。
+     *
+     * @return 戻ったなら true。false ならそのまま死ぬ
+     */
+    public boolean tryRevive() {
+        if (revivesLeft <= 0) {
+            return false;
+        }
+        revivesLeft--;
+        hp = maxHp;
+        progress = 0.0;
+        slowTicks = 0;
+        slowFactor = 0.0;
+        burnTicks = 0;
+        burnDps = 0.0;
+        return true;
     }
 
     public boolean slowed() {
@@ -155,11 +262,37 @@ public final class EnemyInstance {
         return burnTicks > 0;
     }
 
-    /** 装甲を引いたうえで実際に通ったダメージを返す。 */
+    /**
+     * 装甲・呪詛・庇護を通したうえで、実際に削れたぶんを返す。
+     *
+     * <p>順番に意味がある。装甲は固定引き算なので先に引き、
+     * そのあとで呪詛（増）と庇護（減）を掛ける。逆にすると、
+     * 装甲の高い敵に呪詛をかけたときの伸びが不自然に大きくなる。</p>
+     */
     public double damage(double raw) {
         double applied = Math.max(1.0, raw - kind.armor());
+        if (vulnerableTicks > 0) {
+            applied *= 1.0 + vulnerability;
+        }
+        if (wardTicks > 0) {
+            applied *= 1.0 - ward;
+        }
+        applied = Math.max(0.5, applied);
         hp -= applied;
+        tryBlink();
         return applied;
+    }
+
+    /** 被弾したら経路の先へ飛ぶ。生きているあいだだけ。 */
+    private void tryBlink() {
+        if (!kind.trait().blinks() || blinkCooldown > 0 || hp <= 0.0) {
+            return;
+        }
+        blinkCooldown = kind.trait().blinkCooldown();
+        // コアの直前までしか飛べない。飛んだだけで漏れるのは理不尽
+        progress = Math.min(Math.max(0.0, totalLength - 1.0),
+                progress + kind.trait().blinkDistance());
+        blinked = true;
     }
 
     /**
@@ -199,6 +332,15 @@ public final class EnemyInstance {
     // ---------------------------------------------------------------- 毎 tick
 
     public void tick() {
+        if (blinkCooldown > 0) {
+            blinkCooldown--;
+        }
+        if (vulnerableTicks > 0 && --vulnerableTicks == 0) {
+            vulnerability = 0.0;
+        }
+        if (wardTicks > 0 && --wardTicks == 0) {
+            ward = 0.0;
+        }
         if (burnTicks > 0) {
             burnTicks--;
             damageDirect(burnDps / 20.0);
@@ -253,6 +395,15 @@ public final class EnemyInstance {
         }
         if (burnTicks > 0) {
             name = name.append(Component.text(" ✹", NamedTextColor.GOLD));
+        }
+        if (wardTicks > 0) {
+            name = name.append(Component.text(" ⛨", NamedTextColor.BLUE));
+        }
+        if (vulnerableTicks > 0) {
+            name = name.append(Component.text(" ☠", NamedTextColor.LIGHT_PURPLE));
+        }
+        if (revivesLeft > 0) {
+            name = name.append(Component.text(" ✦", NamedTextColor.DARK_PURPLE));
         }
         return name;
     }

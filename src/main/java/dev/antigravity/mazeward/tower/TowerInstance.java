@@ -21,6 +21,13 @@ public final class TowerInstance {
     private int cooldown;
     private Entity label;
 
+    /** 妨害者に黙らされている残り tick。 */
+    private int disabledTicks;
+
+    /** 監視塔からの上乗せ。塔を置くたびに戦場側が計算し直す。 */
+    private double boostDamage;
+    private double boostRate;
+
     public TowerInstance(TowerKind kind, Vec2i origin, Rot rot, int cost) {
         this.kind = kind;
         this.origin = origin;
@@ -101,13 +108,48 @@ public final class TowerInstance {
     }
 
     public boolean ready() {
-        return cooldown <= 0;
+        return cooldown <= 0 && disabledTicks <= 0;
     }
 
     public void tickCooldown() {
         if (cooldown > 0) {
             cooldown--;
         }
+        if (disabledTicks > 0) {
+            disabledTicks--;
+        }
+    }
+
+    /** 妨害者に黙らされる。深いほう（長いほう）を優先する。 */
+    public void disable(int ticks) {
+        disabledTicks = Math.max(disabledTicks, ticks);
+    }
+
+    public boolean disabled() {
+        return disabledTicks > 0;
+    }
+
+    /**
+     * 監視塔からの上乗せを設定する。
+     *
+     * <p>毎 tick 周りの塔を数え直すと塔の数の 2 乗になるので、
+     * 塔が増減したときだけ戦場側から貼り直す。</p>
+     */
+    public void setBoost(double damage, double rate) {
+        this.boostDamage = damage;
+        this.boostRate = rate;
+    }
+
+    public double boostDamage() {
+        return boostDamage;
+    }
+
+    public double boostRate() {
+        return boostRate;
+    }
+
+    public boolean boosted() {
+        return boostDamage > 0 || boostRate > 0;
     }
 
     public void resetCooldown(int ticks) {

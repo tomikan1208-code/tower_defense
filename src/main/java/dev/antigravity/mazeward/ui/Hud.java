@@ -84,8 +84,13 @@ public final class Hud {
             lore.add(Component.text(line, NamedTextColor.DARK_AQUA));
         }
         lore.add(Component.empty());
-        lore.add(Component.text(String.format("射程 %.1f  DPS %.0f", stats.range(), stats.dps()),
+        lore.add(Component.text(String.format("射程 %.1f  間隔 %dt", stats.range(), stats.cooldown()),
                 NamedTextColor.WHITE));
+        if (stats.dps() > 0) {
+            lore.add(Component.text(String.format("DPS %.0f", stats.dps()), NamedTextColor.WHITE));
+        }
+        // 送還・呪詛・支援の塔は攻撃力が 0 なので、効果を出さないと空欄に見える
+        lore.addAll(Menus.effectLore(stats));
         lore.add(Component.text(price, affordable ? NamedTextColor.GREEN : NamedTextColor.RED));
         lore.add(Component.text("右クリック: 壁の上に設置", NamedTextColor.DARK_GRAY));
         if (selected) {
@@ -117,7 +122,7 @@ public final class Hud {
         var inventory = session.player().getInventory();
 
         if (session.handMode() == PlayerSession.HandMode.TOWER) {
-            List<TowerKind> towers = field.availableTowers();
+            List<TowerKind> towers = session.palette();
             for (int slot = 0; slot < PlayerSession.PALETTE_SLOTS; slot++) {
                 if (slot >= towers.size()) {
                     inventory.setItemStack(slot, ItemStack.AIR);
@@ -150,11 +155,18 @@ public final class Hud {
 
     private static ItemStack toggleItem(PlayerSession session) {
         boolean tower = session.handMode() == PlayerSession.HandMode.TOWER;
-        return item(tower ? Material.BRICKS : Material.BOW,
-                Component.text(tower ? "▶ 障害物に持ち替える" : "▶ タワーに持ち替える",
-                        tower ? NamedTextColor.YELLOW : NamedTextColor.AQUA),
-                Component.text(tower ? "いま持っているのはタワー" : "いま持っているのは障害物カード",
-                        NamedTextColor.GRAY),
+        boolean more = session.hasNextTowerPage();
+
+        String next = !tower ? "▶ タワーに持ち替える"
+                : more ? "▶ タワー 続き" : "▶ 障害物に持ち替える";
+        String now = tower
+                ? "いま持っているのはタワー（" + (session.towerPage() + 1) + "ページ目）"
+                : "いま持っているのは障害物カード";
+
+        // 望遠鏡は右クリックでズームしてしまうので使わない
+        return item(!tower ? Material.BOW : more ? Material.PAPER : Material.BRICKS,
+                Component.text(next, tower && !more ? NamedTextColor.YELLOW : NamedTextColor.AQUA),
+                Component.text(now, NamedTextColor.GRAY),
                 Component.text("右クリックで切り替え  1〜6 で選択", NamedTextColor.DARK_GRAY));
     }
 

@@ -57,7 +57,7 @@ public final class VersusHud {
         Island island = self.island();
         int towerCount = island == null ? 0 : island.towers().size();
 
-        set(sidebar, "l1", Component.text("ライフ " + self.lives() + "/" + VersusPlayer.START_LIVES,
+        set(sidebar, "l1", Component.text("ライフ " + self.lives() + "/" + self.maxLives(),
                 self.lives() > 6 ? NamedTextColor.GREEN : NamedTextColor.RED));
         set(sidebar, "l2", Component.text("コイン " + self.coins(), NamedTextColor.GOLD));
         set(sidebar, "l3", Component.text("インカム " + self.income() + " /10秒", NamedTextColor.YELLOW));
@@ -108,26 +108,26 @@ public final class VersusHud {
 
             @Override
             public InventoryType type() {
-                return InventoryType.CHEST_3_ROW;
+                return InventoryType.CHEST_4_ROW;
             }
 
             @Override
             public void render(PlayerSession s, Inventory inventory) {
                 for (int i = 0; i < all.size(); i++) {
-                    inventory.setItemStack(10 + i, sendIcon(all.get(i), self, match));
+                    inventory.setItemStack(menuSlot(i), sendIcon(all.get(i), self, match));
                 }
-                inventory.setItemStack(22, Hud.item(Material.BARRIER,
+                inventory.setItemStack(CLOSE_SLOT, Hud.item(Material.BARRIER,
                         Component.text("閉じる", NamedTextColor.RED)));
             }
 
             @Override
             public void click(PlayerSession s, Inventory inventory, int slot) {
-                if (slot == 22) {
+                if (slot == CLOSE_SLOT) {
                     s.clearMenu();
                     s.player().closeInventory();
                     return;
                 }
-                int index = slot - 10;
+                int index = menuIndex(slot);
                 if (index < 0 || index >= all.size()) {
                     return;
                 }
@@ -136,6 +136,24 @@ public final class VersusHud {
                 render(s, inventory);
             }
         });
+    }
+
+    /** 送りメニューの並び。1 段 7 枠、2 段で 14 枠まで。 */
+    private static final int ROW_WIDTH = 7;
+    private static final int CLOSE_SLOT = 31;
+
+    private static int menuSlot(int index) {
+        return index < ROW_WIDTH ? 10 + index : 19 + (index - ROW_WIDTH);
+    }
+
+    private static int menuIndex(int slot) {
+        if (slot >= 10 && slot <= 16) {
+            return slot - 10;
+        }
+        if (slot >= 19 && slot <= 25) {
+            return ROW_WIDTH + (slot - 19);
+        }
+        return -1;
     }
 
     private static ItemStack sendIcon(AttackerKind kind, VersusPlayer self, VersusMatch match) {

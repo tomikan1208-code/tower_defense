@@ -2,7 +2,9 @@ package dev.antigravity.mazeward.ui;
 
 import dev.antigravity.mazeward.core.Vec2i;
 import dev.antigravity.mazeward.run.BlockCard;
+import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.stage.Stage;
+import dev.antigravity.mazeward.tower.Effect;
 import dev.antigravity.mazeward.tower.TowerInstance;
 import dev.antigravity.mazeward.tower.TowerKind;
 import java.util.ArrayList;
@@ -164,54 +166,56 @@ public final class Menus {
     }
 
     /** 最終段階の特化 1 つぶんのアイコン。 */
-    private static ItemStack specIcon(TowerKind.Spec spec, int cost, int gold) {
+    private static ItemStack specIcon(Battlefield field, TowerKind.Spec spec, int cost) {
         return Hud.item(Material.NETHER_STAR,
                 Component.text("特化: " + spec.displayName(), NamedTextColor.LIGHT_PURPLE),
                 Component.text(spec.description(), NamedTextColor.GRAY),
                 Component.empty(),
                 Component.text("一度選ぶと変更できません", NamedTextColor.DARK_GRAY),
-                Component.text(cost + "G", gold >= cost ? NamedTextColor.GREEN : NamedTextColor.RED));
+                Component.text(field.money(cost),
+                        field.wallet().balance() >= cost ? NamedTextColor.GREEN : NamedTextColor.RED));
     }
 
-    private static ItemStack towerIcon(TowerKind kind, int gold) {
-        TowerKind.Stats stats = kind.statsAt(0);
+    /**
+     * 送還・呪詛・支援の効果を行にする。
+     *
+     * <p>これらの塔は攻撃力が 0 なので、効果を出さないと
+     * 「何もしない塔」に見えてしまう。</p>
+     */
+    static List<Component> effectLore(TowerKind.Stats stats) {
         List<Component> lore = new ArrayList<>();
-        lore.add(Component.text(kind.description(), NamedTextColor.GRAY));
-        lore.add(Component.empty());
-        for (String line : kind.shape().ascii(dev.antigravity.mazeward.core.Rot.R0)) {
-            lore.add(Component.text(line, NamedTextColor.DARK_GRAY));
+        Effect effect = stats.effect();
+        if (effect.knockback() > 0) {
+            lore.add(Component.text(String.format("送還 %.1f ブロック押し戻す", effect.knockback()),
+                    NamedTextColor.DARK_PURPLE));
         }
-        lore.add(Component.empty());
-        lore.add(Component.text("属性 " + kind.element().displayName()
-                + " / " + kind.style().displayName(), kind.element().color()));
-        lore.add(Component.text(String.format("攻撃力 %.0f  射程 %.1f  間隔 %dt",
-                stats.damage(), stats.range(), stats.cooldown()), NamedTextColor.WHITE));
-        if (stats.slowFactor() > 0) {
-            lore.add(Component.text(String.format("減速 %.0f%%", stats.slowFactor() * 100), NamedTextColor.AQUA));
+        if (effect.vulnerability() > 0) {
+            lore.add(Component.text(String.format("呪詛 被ダメージ +%.0f%% (%.1f秒)",
+                    effect.vulnerability() * 100, effect.vulnerabilityTicks() / 20.0),
+                    NamedTextColor.LIGHT_PURPLE));
         }
-        if (stats.burnDps() > 0) {
-            lore.add(Component.text(String.format("燃焼 %.0f/秒", stats.burnDps()), NamedTextColor.GOLD));
+        if (effect.boostDamage() > 0 || effect.boostRate() > 0) {
+            lore.add(Component.text(String.format("支援 周囲の塔の威力 +%.0f%%  手数 +%.0f%%",
+                    effect.boostDamage() * 100, effect.boostRate() * 100), NamedTextColor.AQUA));
         }
-        if (kind.style() == dev.antigravity.mazeward.tower.AttackStyle.SPLASH) {
-            lore.add(Component.text(String.format("範囲半径 %.1f", stats.splashRadius()), NamedTextColor.GOLD));
-        }
-        if (stats.chainTargets() > 0) {
-            lore.add(Component.text("対象数 " + stats.chainTargets(), NamedTextColor.YELLOW));
-        }
-        lore.add(Component.empty());
-        lore.add(Component.text(kind.baseCost() + "G",
-                gold >= kind.baseCost() ? NamedTextColor.GREEN : NamedTextColor.RED));
-        return Hud.item(kind.icon(), Component.text(kind.displayName(), kind.element().color()), lore);
+        return lore;
     }
 
     // ---------------------------------------------------------------- タワー詳細
 
+    /**
+     * タワーの強化・売却。
+     *
+     * <p>{@link Stage} ではなく {@link Battlefield} 越しに触る。
+     * シングル専用にしていると、同じ盤面を使っている対戦で強化も売却もできない。
+     * 通貨の呼び名と残高は戦場が答えるので、ここは両方を区別しなくてよい。</p>
+     */
     public static void openTowerDetail(PlayerSession session, Vec2i cell) {
-        Stage stage = session.stage();
-        if (stage == null) {
+        Battlefield field = session.field();
+        if (field == null) {
             return;
         }
-        TowerInstance tower = stage.towerAt(cell);
+        TowerInstance tower = field.towerAt(cell);
         if (tower == null) {
             session.player().sendActionBar(Component.text("そこにタワーはありません", NamedTextColor.RED));
             return;
@@ -230,12 +234,24 @@ public final class Menus {
 
             @Override
             public void render(PlayerSession s, Inventory inventory) {
-                TowerKind.Stats stats = stage.resolvedStats(tower);
+                TowerKind.Stats stats = field.resolvedStats(tower);
                 List<Component> lore = new ArrayList<>();
-                lore.add(Component.text(String.format("攻撃力 %.1f  射程 %.1f  間隔 %dt",
-                        stats.damage(), stats.range(), stats.cooldown()), NamedTextColor.WHITE));
-                lore.add(Component.text(String.format("推定 DPS %.1f", stats.dps()), NamedTextColor.GRAY));
-                var runes = stage.runesUnder(tower);
+                lore.add(Component.text(String.format("射程 %.1f  間隔 %dt",
+                        stats.range(), stats.cooldown()), NamedTextColor.WHITE));
+                if (stats.damage() > 0) {
+                    lore.add(Component.text(String.format("攻撃力 %.1f  推定 DPS %.1f",
+                            stats.damage(), stats.dps()), NamedTextColor.WHITE));
+                }
+                lore.addAll(effectLore(stats));
+                if (tower.boosted()) {
+                    lore.add(Component.text(String.format("監視塔の支援: 威力 +%.0f%%  手数 +%.0f%%",
+                            tower.boostDamage() * 100, tower.boostRate() * 100),
+                            NamedTextColor.AQUA));
+                }
+                if (tower.disabled()) {
+                    lore.add(Component.text("妨害されて停止中", NamedTextColor.RED));
+                }
+                var runes = field.runesUnder(tower);
                 if (!runes.isEmpty()) {
                     lore.add(Component.empty());
                     for (var rune : runes) {
@@ -256,26 +272,31 @@ public final class Menus {
                 } else if (tower.nextIsSpecialization()) {
                     // 最終段階。同じタワーが 2 つの別物に分かれるので、両方を並べて選ばせる
                     int cost = (int) Math.round(tower.nextUpgradeCost()
-                            * stage.run().upgradeCostMultiplier());
+                            * field.modifiers().upgradeCostMultiplier());
                     List<TowerKind.Spec> specs = tower.kind().specs();
-                    inventory.setItemStack(10, specIcon(specs.get(0), cost, stage.run().gold()));
-                    inventory.setItemStack(12, specIcon(specs.get(1), cost, stage.run().gold()));
+                    inventory.setItemStack(10, specIcon(field, specs.get(0), cost));
+                    inventory.setItemStack(12, specIcon(field, specs.get(1), cost));
                 } else {
-                    int cost = (int) Math.round(tower.nextUpgradeCost() * stage.run().upgradeCostMultiplier());
+                    int cost = (int) Math.round(tower.nextUpgradeCost()
+                            * field.modifiers().upgradeCostMultiplier());
                     TowerKind.Stats next = tower.kind().statsAt(tower.level() + 1);
+                    List<Component> upgradeLore = new ArrayList<>();
+                    if (next.damage() > 0) {
+                        upgradeLore.add(Component.text(String.format("攻撃力 %.1f → %.1f",
+                                tower.stats().damage(), next.damage()), NamedTextColor.WHITE));
+                    }
+                    upgradeLore.add(Component.text(String.format("射程 %.1f → %.1f",
+                            tower.stats().range(), next.range()), NamedTextColor.WHITE));
+                    upgradeLore.add(Component.text(field.money(cost),
+                            field.wallet().balance() >= cost ? NamedTextColor.GREEN : NamedTextColor.RED));
                     inventory.setItemStack(11, Hud.item(Material.ANVIL,
                             Component.text("強化 → Lv" + (tower.level() + 2), NamedTextColor.GREEN),
-                            Component.text(String.format("攻撃力 %.1f → %.1f",
-                                    tower.stats().damage(), next.damage()), NamedTextColor.WHITE),
-                            Component.text(String.format("射程 %.1f → %.1f",
-                                    tower.stats().range(), next.range()), NamedTextColor.WHITE),
-                            Component.text(cost + "G",
-                                    stage.run().gold() >= cost ? NamedTextColor.GREEN : NamedTextColor.RED)));
+                            upgradeLore));
                 }
 
                 inventory.setItemStack(15, Hud.item(Material.HOPPER,
                         Component.text("売却", NamedTextColor.YELLOW),
-                        Component.text("+" + tower.sellValue() + "G", NamedTextColor.GOLD)));
+                        Component.text("+" + field.money(tower.sellValue()), NamedTextColor.GOLD)));
                 inventory.setItemStack(22, Hud.item(Material.BARRIER,
                         Component.text("閉じる", NamedTextColor.RED)));
             }
@@ -289,7 +310,7 @@ public final class Menus {
                             return;
                         }
                         TowerKind.Spec chosen = tower.kind().specs().get(slot == 10 ? 0 : 1);
-                        Stage.Outcome outcome = stage.upgradeTower(cell, chosen);
+                        Battlefield.Outcome outcome = field.upgradeTower(cell, chosen);
                         Hud.feedback(player, outcome);
                         if (outcome.success()) {
                             render(s, inventory);
@@ -299,14 +320,14 @@ public final class Menus {
                         if (tower.nextIsSpecialization()) {
                             return;
                         }
-                        Stage.Outcome outcome = stage.upgradeTower(cell);
+                        Battlefield.Outcome outcome = field.upgradeTower(cell);
                         Hud.feedback(player, outcome);
                         if (outcome.success()) {
                             render(s, inventory);
                         }
                     }
                     case 15 -> {
-                        Stage.Outcome outcome = stage.sellTower(cell);
+                        Battlefield.Outcome outcome = field.sellTower(cell);
                         Hud.feedback(player, outcome);
                         s.clearMenu();
                         player.closeInventory();
