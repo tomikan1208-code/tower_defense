@@ -7,6 +7,7 @@ import dev.antigravity.mazeward.core.Rot;
 import dev.antigravity.mazeward.core.Shape;
 import dev.antigravity.mazeward.core.Vec2i;
 import dev.antigravity.mazeward.run.BlockCard;
+import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.stage.Stage;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
@@ -30,12 +31,27 @@ import net.minestom.server.scoreboard.Sidebar;
  */
 public final class PlayerSession {
 
-    /** ホットバー上の役割。手札は 0〜4、それ以外は固定。 */
-    public static final int MAX_HAND_SLOTS = 5;
-    public static final int SLOT_SELECTED_TOWER = 5;
-    public static final int SLOT_TOWER_SHOP = 6;
+    /**
+     * ホットバー 0〜5 は <b>切り替え式のパレット</b>。
+     *
+     * <p>障害物モードなら手札のカードが、タワーモードならタワーが並ぶ。
+     * 以前はチェストを開いてタワーを選ぶ形だったが、
+     * 置くたびに画面を開き直すことになり、盤面から目を離す時間が長すぎた。
+     * 持ち替えるだけで選べるほうが、迷路を見ながら判断できる。</p>
+     */
+    public static final int PALETTE_SLOTS = 6;
+
+    /** 障害物 ⇄ タワーの切り替え。 */
+    public static final int SLOT_TOGGLE = 6;
+
     public static final int SLOT_INSPECT = 7;
     public static final int SLOT_START = 8;
+
+    /** ホットバー 0〜5 に何を並べるか。 */
+    public enum HandMode {
+        OBSTACLE,
+        TOWER
+    }
 
     /** プレビューを描き直す間隔（tick）。パーティクル量を抑えるため毎 tick にはしない。 */
     private static final int DRAW_INTERVAL = 3;
@@ -48,10 +64,15 @@ public final class PlayerSession {
 
     private final Player player;
 
-    private Stage stage;
+    /**
+     * いま操作している戦場。シングルのステージでも対戦の島でも同じ扱いになる。
+     * ゴーストと経路プレビューはどちらでも同じものを使いたいので、基底型で持つ。
+     */
+    private Battlefield field;
     private Overlay.GhostView ghost;
     private Sidebar sidebar;
 
+    private HandMode handMode = HandMode.OBSTACLE;
     private Mode mode = Mode.NONE;
     private int cardIndex = -1;
     private TowerKind towerKind;
@@ -62,8 +83,17 @@ public final class PlayerSession {
     private MenuHandler menuHandler;
     private boolean menuMandatory;
 
+    /**
+     * 直前に成立した設置。対戦のミラーボットが「人間が何をしたか」を読むために使う。
+     * confirm() の中で原点を計算しているので、外から再計算せずに済むようここに残す。
+     */
+    public record Placement(Mode mode, dev.antigravity.mazeward.core.Shape shape,
+                            TowerKind tower, Vec2i origin, Rot rot) {
+    }
+
+    private Placement lastPlacement;
     private long previewKey = Long.MIN_VALUE;
-    private Stage.PlacementPreview cachedPreview;
+    private Battlefield.PlacementPreview cachedPreview;
 
     /** GUI クリックの受け口。 */
     public interface MenuHandler {
@@ -78,12 +108,27 @@ public final class PlayerSession {
         return player;
     }
 
+    public Battlefield field() {
+        return field;
+    }
+
+    /** キャンペーンのステージ。対戦中なら null。 */
     public Stage stage() {
-        return stage;
+        return field instanceof Stage campaign ? campaign : null;
     }
 
     public Mode mode() {
         return mode;
+    }
+
+    public HandMode handMode() {
+        return handMode;
+    }
+
+    /** 障害物とタワーを切り替える。選択は解除して、持ち替え直してもらう。 */
+    public void toggleHandMode() {
+        handMode = handMode == HandMode.OBSTACLE ? HandMode.TOWER : HandMode.OBSTACLE;
+        clearSelection();
     }
 
     public Rot rot() {
@@ -112,10 +157,10 @@ public final class PlayerSession {
 
     // ---------------------------------------------------------------- ステージ出入り
 
-    public void enterStage(Stage stage) {
+    public void enterStage(Battlefield field) {
         leaveStage();
-        this.stage = stage;
-        this.ghost = new Overlay.GhostView(player, stage.instance());
+        this.field = field;
+        this.ghost = new Overlay.GhostView(player, field.instance());
         clearSelection();
     }
 
@@ -124,7 +169,7 @@ public final class PlayerSession {
             ghost.dispose();
             ghost = null;
         }
-        stage = null;
+        field = null;
         clearSelection();
     }
 
@@ -210,6 +255,9 @@ public final class PlayerSession {
      * 上空から遠く離れたセルも正確に狙える（Minecraft の到達距離に縛られない）。
      */
     public Vec2i raycastCell(double planeY) {
+        if (field == null) {
+            return null;
+        }
         Pos eye = player.getPosition().add(0, player.getEyeHeight(), 0);
         Vec direction = player.getPosition().direction();
         if (direction.y() > -0.02) {
@@ -221,15 +269,16 @@ public final class PlayerSession {
         }
         double x = eye.x() + direction.x() * t;
         double z = eye.z() + direction.z() * t;
-        return new Vec2i((int) Math.floor(x), (int) Math.floor(z));
+        // ワールド座標 → セル座標の変換は戦場側が持つ（島ごとに原点が違うため）
+        return field.arena().toCell(x, z);
     }
 
     /** いま狙っているセル（モードに応じて床 or 壁の上を見る）。 */
     public Vec2i aimCell() {
         if (mode == Mode.TOWER) {
             Vec2i onWall = raycastCell(ArenaRenderer.WALL_TOP_Y);
-            if (onWall != null && stage != null && stage.grid().inBounds(onWall)
-                    && stage.grid().towerBase(onWall)) {
+            if (onWall != null && field != null && field.grid().inBounds(onWall)
+                    && field.grid().towerBase(onWall)) {
                 return onWall;
             }
         }
@@ -239,17 +288,17 @@ public final class PlayerSession {
     // ---------------------------------------------------------------- 毎 tick 描画
 
     public void tick(int globalTick) {
-        if (stage == null || ghost == null) {
+        if (field == null || ghost == null) {
             return;
         }
-        if (!stage.phase().active() || mode == Mode.NONE) {
+        if (!field.buildingAllowed() || mode == Mode.NONE) {
             ghost.hide();
             cursor = null;
             return;
         }
 
         cursor = aimCell();
-        if (cursor == null || !stage.grid().inBounds(cursor)) {
+        if (cursor == null || !field.grid().inBounds(cursor)) {
             ghost.hide();
             return;
         }
@@ -263,20 +312,20 @@ public final class PlayerSession {
     }
 
     private void tickCardPreview(boolean draw) {
-        BlockCard card = stage.run().deck().peek(cardIndex);
+        BlockCard card = field.deck().peek(cardIndex);
         if (card == null) {
             clearSelection();
             return;
         }
         Shape shape = card.shape();
-        Vec2i origin = stage.originFor(shape, cursor, rot);
+        Vec2i origin = field.originFor(shape, cursor, rot);
 
-        long key = key(origin, rot.ordinal(), cardIndex, stage.gridVersion());
+        long key = key(origin, rot.ordinal(), cardIndex, field.gridVersion());
         if (key != previewKey) {
             previewKey = key;
-            cachedPreview = stage.preview(shape, origin, rot);
+            cachedPreview = field.preview(shape, origin, rot);
         }
-        Stage.PlacementPreview preview = cachedPreview;
+        Battlefield.PlacementPreview preview = cachedPreview;
         boolean ok = preview.ok();
 
         List<Vec2i> cells = shape.cellsAt(origin, rot);
@@ -287,8 +336,9 @@ public final class PlayerSession {
         Component label = ok ? null
                 : Component.text("✖ " + preview.error(), NamedTextColor.RED);
 
-        ghost.show(cells, block, ArenaRenderer.SURFACE_Y, 1.0,
-                label, cursor.x() + 0.5, cursor.z() + 0.5, ArenaRenderer.SURFACE_Y + 2.6);
+        ghost.show(field.toWorldPath(cells), block, ArenaRenderer.SURFACE_Y, 1.0,
+                label, field.arena().centerX(cursor), field.arena().centerZ(cursor),
+                ArenaRenderer.SURFACE_Y + 2.6);
 
         if (draw && ok) {
             drawChangedPathSections(preview);
@@ -302,8 +352,8 @@ public final class PlayerSession {
      * かえって読めなくなる。前後の共通部分を落として差分の区間だけを出す。
      * 経路がまったく変わらない置き方なら赤は 1 本も出ない。</p>
      */
-    private void drawChangedPathSections(Stage.PlacementPreview preview) {
-        List<PathResult> current = stage.paths();
+    private void drawChangedPathSections(Battlefield.PlacementPreview preview) {
+        List<PathResult> current = field.paths();
         List<List<Vec2i>> predicted = preview.previewPaths();
         for (int i = 0; i < predicted.size(); i++) {
             List<Vec2i> before = i < current.size() ? current.get(i).waypoints() : List.of();
@@ -311,7 +361,8 @@ public final class PlayerSession {
             if (changed.isEmpty()) {
                 continue;
             }
-            Overlay.drawPath(List.of(player), changed, Palette.PATH_PREVIEW, Overlay.Y_PREVIEW, 0.85f);
+            Overlay.drawPath(List.of(player), field.toWorldPath(changed),
+                    Palette.PATH_PREVIEW, Overlay.Y_PREVIEW, 0.85f);
         }
     }
 
@@ -321,8 +372,8 @@ public final class PlayerSession {
             return;
         }
         Shape shape = towerKind.shape();
-        Vec2i origin = stage.originFor(shape, cursor, rot);
-        String error = stage.towerPlacementError(towerKind, origin, rot);
+        Vec2i origin = field.originFor(shape, cursor, rot);
+        String error = field.towerPlacementError(towerKind, origin, rot);
         boolean ok = error == null;
 
         List<Vec2i> cells = shape.cellsAt(origin, rot);
@@ -333,16 +384,17 @@ public final class PlayerSession {
                         towerKind.element().color())
                 : Component.text("✖ " + error, NamedTextColor.RED);
 
-        ghost.show(cells, block, ArenaRenderer.WALL_TOP_Y, 1.0,
-                label, cursor.x() + 0.5, cursor.z() + 0.5, ArenaRenderer.WALL_TOP_Y + 2.0);
+        ghost.show(field.toWorldPath(cells), block, ArenaRenderer.WALL_TOP_Y, 1.0,
+                label, field.arena().centerX(cursor), field.arena().centerZ(cursor),
+                ArenaRenderer.WALL_TOP_Y + 2.0);
 
         if (draw) {
-            double range = towerKind.statsAt(0).range() + stage.run().rangeBonus();
+            double range = towerKind.statsAt(0).range() + field.modifiers().rangeBonus();
             double cx = 0;
             double cz = 0;
             for (Vec2i cell : cells) {
-                cx += cell.x() + 0.5;
-                cz += cell.z() + 0.5;
+                cx += field.arena().centerX(cell);
+                cz += field.arena().centerZ(cell);
             }
             Overlay.drawRangeRing(List.of(player), cx / cells.size(), cz / cells.size(), range);
         }
@@ -357,39 +409,41 @@ public final class PlayerSession {
      * tick でキャッシュした値に頼ると、まだ 1 度も tick を通っていない状況
      * （ステージに入った直後など）で「狙っている場所がありません」になってしまう。</p>
      */
-    public Stage.Outcome confirm() {
-        if (stage == null) {
-            return Stage.Outcome.fail("ステージにいません");
+    public Battlefield.Outcome confirm() {
+        if (field == null) {
+            return Battlefield.Outcome.fail("ステージにいません");
         }
         if (mode == Mode.NONE) {
-            return Stage.Outcome.fail("ホットバー 1〜5 でカードを選ぶか、7 番のタワー一覧から選んでください");
+            return Battlefield.Outcome.fail("ホットバー 1〜5 でカードを選ぶか、7 番のタワー一覧から選んでください");
         }
 
         Vec2i target = aimCell();
         if (target == null) {
-            return Stage.Outcome.fail("床が見えていません。もう少し下を向いてから右クリックしてください");
+            return Battlefield.Outcome.fail("床が見えていません。もう少し下を向いてから右クリックしてください");
         }
-        if (!stage.grid().inBounds(target)) {
-            return Stage.Outcome.fail("アリーナの外を狙っています");
+        if (!field.grid().inBounds(target)) {
+            return Battlefield.Outcome.fail("アリーナの外を狙っています");
         }
         cursor = target;
 
         if (mode == Mode.CARD) {
-            BlockCard card = stage.run().deck().peek(cardIndex);
+            BlockCard card = field.deck().peek(cardIndex);
             if (card == null) {
-                return Stage.Outcome.fail("手札が空です");
+                return Battlefield.Outcome.fail("手札が空です");
             }
-            Vec2i origin = stage.originFor(card.shape(), target, rot);
-            Stage.Outcome outcome = stage.placeCard(cardIndex, origin, rot);
+            Vec2i origin = field.originFor(card.shape(), target, rot);
+            Battlefield.Outcome outcome = field.placeCard(cardIndex, origin, rot);
             if (outcome.success()) {
+                lastPlacement = new Placement(Mode.CARD, card.shape(), null, origin, rot);
                 invalidatePreview();
             }
             return outcome;
         }
 
-        Vec2i origin = stage.originFor(towerKind.shape(), target, rot);
-        Stage.Outcome outcome = stage.placeTower(towerKind, origin, rot);
+        Vec2i origin = field.originFor(towerKind.shape(), target, rot);
+        Battlefield.Outcome outcome = field.placeTower(towerKind, origin, rot);
         if (outcome.success()) {
+            lastPlacement = new Placement(Mode.TOWER, towerKind.shape(), towerKind, origin, rot);
             invalidatePreview();
         }
         return outcome;
@@ -402,31 +456,48 @@ public final class PlayerSession {
      * 「何も選ばれていないので右クリックが効かない」状態にならないようにする。
      * ホットバーのスロットを正とするので、スクロールするだけでカードを選べる。</p>
      */
+    /**
+     * 持っているスロットに合わせて選択を直す。
+     * パレットのスロットなら、いまのモードに応じてカードかタワーを選ぶ。
+     */
     public void syncSelectionWithHotbar() {
-        if (stage == null || !stage.phase().active() || mode == Mode.TOWER) {
+        if (field == null || !field.buildingAllowed()) {
             return;
         }
-        int handSize = stage.run().deck().hand().size();
         int slot = player.getHeldSlot();
+        if (slot >= PALETTE_SLOTS) {
+            clearSelection();
+            return;
+        }
 
-        if (slot < MAX_HAND_SLOTS && slot < handSize) {
-            if (mode != Mode.CARD || cardIndex != slot) {
-                selectCard(slot);
+        if (handMode == HandMode.TOWER) {
+            var towers = field.availableTowers();
+            if (slot < towers.size()) {
+                if (mode != Mode.TOWER || towerKind != towers.get(slot)) {
+                    selectTower(towers.get(slot));
+                }
+            } else {
+                clearSelection();
             }
             return;
         }
-        // 手札スロット以外を持っているならカード選択は解除
-        if (mode == Mode.CARD && (slot >= MAX_HAND_SLOTS || cardIndex >= handSize)) {
+
+        int handSize = field.deck().hand().size();
+        if (slot < handSize) {
+            if (mode != Mode.CARD || cardIndex != slot) {
+                selectCard(slot);
+            }
+        } else {
             clearSelection();
         }
     }
 
     /** カードを 1 枚使ったあと、手札の詰め直しに合わせて選択を維持する。 */
     public void reselectAfterPlay() {
-        if (stage == null) {
+        if (field == null || handMode != HandMode.OBSTACLE) {
             return;
         }
-        int handSize = stage.run().deck().hand().size();
+        int handSize = field.deck().hand().size();
         if (handSize == 0) {
             clearSelection();
             return;
@@ -436,18 +507,25 @@ public final class PlayerSession {
         player.setHeldItemSlot((byte) next);
     }
 
+    /** 直前に成立した設置を取り出す（1 度読むと消える）。 */
+    public Placement takeLastPlacement() {
+        Placement placement = lastPlacement;
+        lastPlacement = null;
+        return placement;
+    }
+
     /** 検査モードで狙ったセルのタワー。 */
     public Vec2i inspectCell() {
         Vec2i onWall = raycastCell(ArenaRenderer.WALL_TOP_Y);
-        if (onWall != null && stage != null && stage.grid().inBounds(onWall)
-                && stage.towerAt(onWall) != null) {
+        if (onWall != null && field != null && field.grid().inBounds(onWall)
+                && field.towerAt(onWall) != null) {
             return onWall;
         }
         return raycastCell(ArenaRenderer.SURFACE_Y);
     }
 
     public Grid grid() {
-        return stage == null ? null : stage.grid();
+        return field == null ? null : field.grid();
     }
 
     private static long key(Vec2i cell, int rotation, int index, int version) {

@@ -1,6 +1,5 @@
 package dev.antigravity.mazeward.world;
 
-import dev.antigravity.mazeward.core.Vec2i;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -54,9 +53,11 @@ public final class Overlay {
      * <p>色は 1 経路につき 1 色だけ使う。進行方向マーカーのような別色を重ねると、
      * 「現在の経路（青）」と「変更後の経路（赤）」の区別がつきにくくなるため。</p>
      *
-     * @param waypoints 曲がり角のセル座標（中心を通る）
+     * @param waypoints 曲がり角の <b>ワールド座標</b>。
+     *                  グリッド座標との変換は {@code ArenaRenderer} が持つので、
+     *                  ここは island の位置を一切知らない
      */
-    public static void drawPath(Collection<Player> viewers, List<Vec2i> waypoints,
+    public static void drawPath(Collection<Player> viewers, List<Pos> waypoints,
                                 Color color, double yOffset, float scale) {
         if (viewers.isEmpty() || waypoints.isEmpty()) {
             return;
@@ -66,8 +67,8 @@ public final class Overlay {
         double y = ArenaRenderer.SURFACE_Y + yOffset;
 
         // 曲がり角を強調する（「ここで曲がる」を読ませるのが目的）
-        for (Vec2i waypoint : waypoints) {
-            emit(viewers, cornerDust, waypoint.x() + 0.5, y + 0.06, waypoint.z() + 0.5);
+        for (Pos waypoint : waypoints) {
+            emit(viewers, cornerDust, waypoint.x(), y + 0.06, waypoint.z());
         }
         if (waypoints.size() == 1) {
             return;
@@ -76,7 +77,7 @@ public final class Overlay {
         int count = waypoints.size();
         double[] cumulative = new double[count];
         for (int i = 1; i < count; i++) {
-            cumulative[i] = cumulative[i - 1] + centerDistance(waypoints.get(i - 1), waypoints.get(i));
+            cumulative[i] = cumulative[i - 1] + flatDistance(waypoints.get(i - 1), waypoints.get(i));
         }
         double total = cumulative[count - 1];
         if (total <= 1e-6) {
@@ -88,18 +89,18 @@ public final class Overlay {
             while (segment < count - 2 && cumulative[segment + 1] < travelled) {
                 segment++;
             }
-            Vec2i from = waypoints.get(segment);
-            Vec2i to = waypoints.get(segment + 1);
+            Pos from = waypoints.get(segment);
+            Pos to = waypoints.get(segment + 1);
             double segmentLength = cumulative[segment + 1] - cumulative[segment];
             double t = segmentLength <= 1e-9 ? 0.0 : (travelled - cumulative[segment]) / segmentLength;
-            double x = (from.x() + 0.5) + ((to.x() - from.x()) * t);
-            double z = (from.z() + 0.5) + ((to.z() - from.z()) * t);
+            double x = from.x() + (to.x() - from.x()) * t;
+            double z = from.z() + (to.z() - from.z()) * t;
 
             emit(viewers, dust, x, y, z);
         }
     }
 
-    private static double centerDistance(Vec2i a, Vec2i b) {
+    private static double flatDistance(Pos a, Pos b) {
         double dx = b.x() - a.x();
         double dz = b.z() - a.z();
         return Math.sqrt(dx * dx + dz * dz);
@@ -256,18 +257,19 @@ public final class Overlay {
         /**
          * ゴーストを表示する。
          *
+         * @param cells  各セルの中心の <b>ワールド座標</b>
          * @param baseY  ブロック表示の底面の高さ（障害物は床、タワーは壁の上）
-         * @param height ブロック表示の高さ（障害物は 2 ブロック相当、タワーは 1）
+         * @param height ブロック表示の高さ
          */
-        public void show(List<Vec2i> cells, Block block, double baseY, double height,
+        public void show(List<Pos> cells, Block block, double baseY, double height,
                          Component labelText, double labelX, double labelZ, double labelY) {
             visible = true;
             ensureCapacity(cells.size(), block);
 
             for (int i = 0; i < cells.size(); i++) {
-                Vec2i cell = cells.get(i);
+                Pos cell = cells.get(i);
                 Entity entity = blocks.get(i);
-                entity.teleport(new Pos(cell.x() + 0.5, baseY, cell.z() + 0.5));
+                entity.teleport(new Pos(cell.x(), baseY, cell.z()));
                 entity.editEntityMeta(BlockDisplayMeta.class, meta -> {
                     meta.setBlockState(block);
                     meta.setScale(new Vec(0.9, height, 0.9));

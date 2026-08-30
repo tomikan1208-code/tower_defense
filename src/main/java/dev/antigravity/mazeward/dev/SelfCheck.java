@@ -14,6 +14,7 @@ import dev.antigravity.mazeward.run.Roadmap;
 import dev.antigravity.mazeward.run.RunState;
 import dev.antigravity.mazeward.stage.StageGenerator;
 import dev.antigravity.mazeward.stage.Waves;
+import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.Palette;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -39,6 +40,7 @@ public final class SelfCheck {
         checkPathDiff();
         checkPathDeterminism();
         checkBlockingRule();
+        checkTowerSpecs();
         checkCardMaterials();
         checkRoadmapGraph();
         checkGeneration();
@@ -361,6 +363,40 @@ public final class SelfCheck {
         assertTrue(finalPath.reachable(), "詰め込んだ後に経路が消えた");
         System.out.printf("  ランダム配置 %d 枚後も経路は健在（実距離 %.1f / 折れ点 %d）%n",
                 placed, finalPath.length(), finalPath.turns());
+    }
+
+    // ---------------------------------------------------------------- タワーの特化
+
+    /**
+     * 最終段階の特化が、本当に 2 つの別物になっているかを確かめる。
+     * どちらを選んでも同じ性能なら、選択が成立していない。
+     */
+    private static void checkTowerSpecs() {
+        section("タワーの最終特化");
+
+        for (TowerKind kind : TowerKind.values()) {
+            List<TowerKind.Spec> specs = kind.specs();
+            assertTrue(specs.size() == 2, kind + " の特化が 2 つではない");
+
+            int last = TowerKind.MAX_LEVEL;
+            TowerKind.Stats plain = kind.statsAt(last, null);
+            TowerKind.Stats a = kind.statsAt(last, specs.get(0));
+            TowerKind.Stats b = kind.statsAt(last, specs.get(1));
+
+            assertTrue(!a.equals(b), kind + " の 2 つの特化が同じ性能になっている");
+            assertTrue(!a.equals(plain) && !b.equals(plain),
+                    kind + " の特化が無印と変わっていない");
+            assertTrue(a.damage() > 0 || a.burnDps() > 0, kind + " の特化 A に攻撃手段がない");
+            assertTrue(b.damage() > 0 || b.burnDps() > 0, kind + " の特化 B に攻撃手段がない");
+            assertTrue(a.cooldown() >= 2 && b.cooldown() >= 2, kind + " の攻撃間隔が短すぎる");
+            assertTrue(a.chainTargets() >= 1 && b.chainTargets() >= 1,
+                    kind + " の対象数が 0 以下になっている");
+
+            System.out.printf("  %-4s %s(DPS %.0f) / %s(DPS %.0f)%n",
+                    kind.displayName(),
+                    specs.get(0).displayName(), a.dps(),
+                    specs.get(1).displayName(), b.dps());
+        }
     }
 
     // ---------------------------------------------------------------- カードの素材

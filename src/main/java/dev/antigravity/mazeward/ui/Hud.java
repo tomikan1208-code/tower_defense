@@ -1,10 +1,13 @@
 package dev.antigravity.mazeward.ui;
 
+import dev.antigravity.mazeward.core.Rot;
 import dev.antigravity.mazeward.run.BlockCard;
 import dev.antigravity.mazeward.run.Relic;
 import dev.antigravity.mazeward.run.RunState;
 import dev.antigravity.mazeward.stage.Phase;
+import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.stage.Stage;
+import dev.antigravity.mazeward.tower.TowerKind;
 import java.util.ArrayList;
 import java.util.List;
 import net.kyori.adventure.text.Component;
@@ -64,7 +67,96 @@ public final class Hud {
                 .build();
     }
 
+    /**
+     * タワーをホットバーに置くときのアイコン。
+     *
+     * <p>チェストを開かずに選ぶので、性能はすべてここに載せる。
+     * 形も出す。タワーは複数マスを占めるので、
+     * 「その土台に載るか」が分からないと持ち替える意味がない。</p>
+     */
+    public static ItemStack towerPaletteItem(TowerKind kind, boolean selected,
+                                             String price, boolean affordable) {
+        TowerKind.Stats stats = kind.statsAt(0);
+        List<Component> lore = new ArrayList<>();
+        lore.add(Component.text(kind.description(), NamedTextColor.GRAY));
+        lore.add(Component.empty());
+        for (String line : kind.shape().ascii(Rot.R0)) {
+            lore.add(Component.text(line, NamedTextColor.DARK_AQUA));
+        }
+        lore.add(Component.empty());
+        lore.add(Component.text(String.format("射程 %.1f  DPS %.0f", stats.range(), stats.dps()),
+                NamedTextColor.WHITE));
+        lore.add(Component.text(price, affordable ? NamedTextColor.GREEN : NamedTextColor.RED));
+        lore.add(Component.text("右クリック: 壁の上に設置", NamedTextColor.DARK_GRAY));
+        if (selected) {
+            lore.add(Component.text("▶ 選択中", NamedTextColor.GREEN));
+        }
+        return ItemStack.builder(kind.icon())
+                .customName(Component.text(kind.displayName(),
+                                selected ? NamedTextColor.GREEN : kind.element().color())
+                        .decoration(TextDecoration.ITALIC, false))
+                .lore(lore.stream().map(line -> line.decoration(TextDecoration.ITALIC, false)).toList())
+                .glowing(selected)
+                .hideExtraTooltip()
+                .build();
+    }
+
     // ---------------------------------------------------------------- ホットバー
+
+    /**
+     * ホットバー 0〜5 と切り替えスロットを描く。
+     *
+     * <p>シングルも対戦もここを共有する。
+     * 「障害物を持つか、タワーを持つか」は盤面の見え方に関わらず同じ操作であってほしい。</p>
+     */
+    public static void applyPalette(PlayerSession session) {
+        Battlefield field = session.field();
+        if (field == null) {
+            return;
+        }
+        var inventory = session.player().getInventory();
+
+        if (session.handMode() == PlayerSession.HandMode.TOWER) {
+            List<TowerKind> towers = field.availableTowers();
+            for (int slot = 0; slot < PlayerSession.PALETTE_SLOTS; slot++) {
+                if (slot >= towers.size()) {
+                    inventory.setItemStack(slot, ItemStack.AIR);
+                    continue;
+                }
+                TowerKind kind = towers.get(slot);
+                boolean selected = session.mode() == PlayerSession.Mode.TOWER
+                        && session.selectedTower() == kind;
+                inventory.setItemStack(slot, towerPaletteItem(kind, selected,
+                        field.money(kind.baseCost()),
+                        field.wallet().balance() >= kind.baseCost()));
+            }
+        } else {
+            List<BlockCard> hand = field.deck().hand();
+            for (int slot = 0; slot < PlayerSession.PALETTE_SLOTS; slot++) {
+                if (slot >= hand.size()) {
+                    inventory.setItemStack(slot, ItemStack.AIR);
+                    continue;
+                }
+                boolean selected = session.mode() == PlayerSession.Mode.CARD
+                        && session.cardIndex() == slot;
+                inventory.setItemStack(slot, cardItem(hand.get(slot),
+                        selected ? session.rot() : Rot.R0, selected,
+                        cardMaterial(field, hand.get(slot))));
+            }
+        }
+
+        inventory.setItemStack(PlayerSession.SLOT_TOGGLE, toggleItem(session));
+    }
+
+    private static ItemStack toggleItem(PlayerSession session) {
+        boolean tower = session.handMode() == PlayerSession.HandMode.TOWER;
+        return item(tower ? Material.BRICKS : Material.BOW,
+                Component.text(tower ? "▶ 障害物に持ち替える" : "▶ タワーに持ち替える",
+                        tower ? NamedTextColor.YELLOW : NamedTextColor.AQUA),
+                Component.text(tower ? "いま持っているのはタワー" : "いま持っているのは障害物カード",
+                        NamedTextColor.GRAY),
+                Component.text("右クリックで切り替え  1〜6 で選択", NamedTextColor.DARK_GRAY));
+    }
 
     public static void applyStageHotbar(PlayerSession session) {
         Player player = session.player();
@@ -72,35 +164,7 @@ public final class Hud {
         if (stage == null) {
             return;
         }
-        RunState run = stage.run();
-        List<BlockCard> hand = run.deck().hand();
-
-        for (int slot = 0; slot < PlayerSession.MAX_HAND_SLOTS; slot++) {
-            if (slot < hand.size()) {
-                boolean selected = session.mode() == PlayerSession.Mode.CARD && session.cardIndex() == slot;
-                player.getInventory().setItemStack(slot,
-                        cardItem(hand.get(slot), selected ? session.rot()
-                                        : dev.antigravity.mazeward.core.Rot.R0, selected,
-                                cardMaterial(stage, hand.get(slot))));
-            } else {
-                player.getInventory().setItemStack(slot, ItemStack.AIR);
-            }
-        }
-
-        if (session.mode() == PlayerSession.Mode.TOWER && session.selectedTower() != null) {
-            var kind = session.selectedTower();
-            player.getInventory().setItemStack(PlayerSession.SLOT_SELECTED_TOWER,
-                    item(kind.icon(),
-                            Component.text("選択中: " + kind.displayName(), kind.element().color()),
-                            Component.text(kind.baseCost() + "G", NamedTextColor.GOLD),
-                            Component.text("左クリック: 回転  右クリック: 設置", NamedTextColor.DARK_GRAY)));
-        } else {
-            player.getInventory().setItemStack(PlayerSession.SLOT_SELECTED_TOWER, ItemStack.AIR);
-        }
-
-        player.getInventory().setItemStack(PlayerSession.SLOT_TOWER_SHOP,
-                item(Material.CHEST, Component.text("タワー一覧", NamedTextColor.AQUA),
-                        Component.text("右クリックで開く", NamedTextColor.DARK_GRAY)));
+        applyPalette(session);
 
         // 望遠鏡は右クリックで画面がズームしてしまうため、使用アクションのないアイテムを使う
         player.getInventory().setItemStack(PlayerSession.SLOT_INSPECT,
@@ -119,10 +183,10 @@ public final class Hud {
     }
 
     /** そのカードが実際に置くブロックに対応するアイテム。手札を見れば素材が分かる。 */
-    private static Material cardMaterial(Stage stage, BlockCard card) {
+    private static Material cardMaterial(Battlefield field, BlockCard card) {
         var block = card.hasRune()
                 ? card.rune().wallBlock()
-                : stage.arena().theme().wallForVariant(card.variant());
+                : field.arena().theme().wallForVariant(card.variant());
         Material material = block.registry().material();
         return material == null ? Material.STONE_BRICKS : material;
     }
@@ -130,8 +194,42 @@ public final class Hud {
     public static void applyLobbyHotbar(Player player) {
         player.getInventory().clear();
         player.getInventory().setItemStack(0,
-                item(Material.NETHER_STAR, Component.text("新しいランを開始", NamedTextColor.GOLD),
-                        Component.text("右クリックでロードマップへ", NamedTextColor.GRAY)));
+                item(Material.NETHER_STAR, Component.text("ソロ — ローグライト", NamedTextColor.GOLD),
+                        Component.text("7 層のノードマップを踏破する", NamedTextColor.GRAY),
+                        Component.text("右クリックで開始", NamedTextColor.DARK_GRAY)));
+        player.getInventory().setItemStack(1,
+                item(Material.IRON_SWORD, Component.text("対戦 — 送り合い", NamedTextColor.RED),
+                        Component.text("島を守りながら相手にモンスターを送る", NamedTextColor.GRAY),
+                        Component.text("右クリックで待機部屋へ移動", NamedTextColor.DARK_GRAY)));
+    }
+
+    /**
+     * 待機部屋のホットバー。
+     *
+     * <p>部屋に入っている人がそのまま参加者になるので、人数を選ぶ操作はない。
+     * 押せるかどうかを色で出しておかないと、
+     * 「押したのに始まらない」のか「まだ人が足りない」のかが分からない。</p>
+     */
+    public static void applyWaitingHotbar(Player player, int party) {
+        boolean ready = party >= 2;
+        player.getInventory().clear();
+        player.getInventory().setItemStack(0, ready
+                ? item(Material.LIME_DYE,
+                        Component.text("▶ 対戦を開始", NamedTextColor.GREEN),
+                        Component.text("いま部屋にいる " + party + " 人で始めます", NamedTextColor.GRAY),
+                        Component.text("右クリック", NamedTextColor.DARK_GRAY))
+                : item(Material.GRAY_DYE,
+                        Component.text("開始できません", NamedTextColor.RED),
+                        Component.text("参加 " + party + " 人 — あと "
+                                + (2 - party) + " 人必要", NamedTextColor.GRAY)));
+        player.getInventory().setItemStack(1,
+                item(Material.PLAYER_HEAD,
+                        Component.text("デバッグ: ボットで埋める", NamedTextColor.LIGHT_PURPLE),
+                        Component.text("あなたの操作を真似するボットと対戦します", NamedTextColor.GRAY),
+                        Component.text("動作確認用", NamedTextColor.DARK_GRAY)));
+        player.getInventory().setItemStack(8,
+                item(Material.BARRIER, Component.text("ロビーに戻る", NamedTextColor.RED),
+                        Component.text("部屋を出ると参加は取り消されます", NamedTextColor.DARK_GRAY)));
     }
 
     public static void applyRoadmapHotbar(Player player) {

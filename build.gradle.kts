@@ -47,3 +47,12 @@ tasks.register<JavaExec>("combatSim") {
     classpath = sourceSets["main"].runtimeClasspath
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }
+
+// Headless verification of the versus mode (islands, economy, sending, win condition).
+tasks.register<JavaExec>("versusSim") {
+    group = "verification"
+    description = "Simulates a versus match headlessly"
+    mainClass.set("dev.antigravity.mazeward.dev.VersusSim")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+}

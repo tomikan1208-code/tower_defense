@@ -23,6 +23,14 @@ import java.util.Random;
  */
 public final class Deck {
 
+    /**
+     * 手札の上限。
+     *
+     * <p>ホットバーの切り替えパレットが 6 枠なので、それ以上は持てても表示できない。
+     * 「増えたはずのカードが見えない」ほうが、上限で止まるより分かりにくい。</p>
+     */
+    public static final int MAX_HAND_SIZE = 6;
+
     private final List<BlockCard> library = new ArrayList<>();
     private final List<BlockCard> drawPile = new ArrayList<>();
     private final List<BlockCard> hand = new ArrayList<>();
@@ -97,8 +105,12 @@ public final class Deck {
         return baseHandSize;
     }
 
+    public boolean canIncreaseHandSize() {
+        return baseHandSize < MAX_HAND_SIZE;
+    }
+
     public void increaseHandSize(int amount) {
-        baseHandSize += amount;
+        baseHandSize = Math.min(MAX_HAND_SIZE, baseHandSize + amount);
     }
 
     /** ステージ開始時。山札を作り直して手札を空にする。 */
@@ -117,6 +129,25 @@ public final class Deck {
             drawn++;
         }
         return drawn;
+    }
+
+    /**
+     * 1 枚だけ引く。山札が尽きていたらライブラリを切り直して引き直す。
+     * 対戦のように「一定時間ごとに配る」用途で使う。
+     */
+    public boolean drawOne(int handLimit, Random random) {
+        if (hand.size() >= handLimit) {
+            return false;
+        }
+        if (drawPile.isEmpty()) {
+            drawPile.addAll(library);
+            Collections.shuffle(drawPile, random);
+        }
+        if (drawPile.isEmpty()) {
+            return false;
+        }
+        hand.add(drawPile.remove(drawPile.size() - 1));
+        return true;
     }
 
     public List<BlockCard> hand() {

@@ -13,12 +13,20 @@ import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.ui.Hud;
 import dev.antigravity.mazeward.ui.Menus;
 import dev.antigravity.mazeward.ui.PlayerSession;
+import dev.antigravity.mazeward.ui.VersusHud;
+import dev.antigravity.mazeward.versus.MirrorBot;
+import dev.antigravity.mazeward.versus.WaitingRoom;
+import dev.antigravity.mazeward.versus.VersusMatch;
+import dev.antigravity.mazeward.versus.VersusPlayer;
 import dev.antigravity.mazeward.world.Overlay;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
@@ -113,6 +121,23 @@ public final class Mazeward implements Stage.Listener {
     private static final int[] SHOP_SLOTS = {10, 12, 14, 16, 20};
 
     private RunState run;
+
+    // 対戦モード
+    private VersusMatch versus;
+    private InstanceContainer versusInstance;
+    /**
+     * 対戦中の人間プレイヤー。
+     *
+     * <p>1 人ぶんのフィールドで持っていると、実際に複数人が入ったときに
+     * 全員が同じ島を操作してしまう。最初から人ごとに持っておく。</p>
+     */
+    private final Map<UUID, VersusPlayer> versusHumans = new LinkedHashMap<>();
+
+    private WaitingRoom waitingRoom;
+    private final Set<UUID> waitingParty = new LinkedHashSet<>();
+    private int matchEndedTick = -1;
+    private final List<MirrorBot> bots = new ArrayList<>();
+
     private Roadmap.Node activeNode;
     private Stage stage;
     private InstanceContainer stageInstance;
@@ -131,6 +156,7 @@ public final class Mazeward implements Stage.Listener {
         roadmap.setTime(18000);
         roadmap.setTimeRate(0);
         buildLobby();
+        waitingRoom = new WaitingRoom(lobby);
     }
 
     // ================================================================ プレイヤー
@@ -158,6 +184,10 @@ public final class Mazeward implements Stage.Listener {
         PlayerSession session = sessions.remove(player.getUuid());
         if (session != null) {
             session.leaveStage();
+        }
+        versusHumans.remove(player.getUuid());
+        if (waitingParty.remove(player.getUuid())) {
+            refreshWaitingRoom();
         }
         if (stage != null) {
             stage.removePlayer(player);
@@ -192,11 +222,11 @@ public final class Mazeward implements Stage.Listener {
     /** 左クリック（腕振り）＝ 回転。 */
     public void onHandAnimation(PlayerHandAnimationEvent event) {
         PlayerSession session = session(event.getPlayer());
-        if (session.stage() == null || session.mode() == PlayerSession.Mode.NONE) {
+        if (session.field() == null || session.mode() == PlayerSession.Mode.NONE) {
             return;
         }
         session.rotate();
-        Hud.applyStageHotbar(session);
+        refreshHotbar(session);
         event.getPlayer().sendActionBar(Component.text("回転: " + session.rot().label(), NamedTextColor.YELLOW));
     }
 
@@ -222,20 +252,40 @@ public final class Mazeward implements Stage.Listener {
 
     public void onChangeHeldSlot(PlayerChangeHeldSlotEvent event) {
         PlayerSession session = session(event.getPlayer());
-        if (session.stage() == null) {
+        if (session.field() == null) {
             return;
         }
-        int slot = event.getNewSlot();
-        if (slot == PlayerSession.SLOT_SELECTED_TOWER && session.selectedTower() != null) {
-            return;
+        // どちらのモードで持ち替えたかは PlayerSession が判断する
+        session.syncSelectionWithHotbar();
+        refreshHotbar(session);
+    }
+
+    /**
+     * 障害物 ⇄ タワーを切り替え、そのまま 1 番のスロットへ戻す。
+     *
+     * <p>切り替えた直後に何も持っていない状態にすると、
+     * 「切り替わったのか」が分からない。先頭を選んだ状態にしておくと、
+     * 持ち替えの結果がゴーストとして即座に見える。</p>
+     */
+    private void toggleHand(PlayerSession session) {
+        session.toggleHandMode();
+        session.player().setHeldItemSlot((byte) 0);
+        session.syncSelectionWithHotbar();
+        refreshHotbar(session);
+        boolean tower = session.handMode() == PlayerSession.HandMode.TOWER;
+        session.player().sendActionBar(Component.text(
+                tower ? "タワーに持ち替えました" : "障害物カードに持ち替えました",
+                tower ? NamedTextColor.AQUA : NamedTextColor.YELLOW));
+    }
+
+    /** いまのモードに合ったホットバーを描き直す。 */
+    private void refreshHotbar(PlayerSession session) {
+        VersusPlayer self = versusPlayerOf(session.player());
+        if (versus != null && self != null) {
+            VersusHud.applyHotbar(session, self, versus);
+        } else if (session.stage() != null) {
+            Hud.applyStageHotbar(session);
         }
-        if (slot < PlayerSession.MAX_HAND_SLOTS
-                && slot < session.stage().run().deck().hand().size()) {
-            session.selectCard(slot);
-        } else {
-            session.clearSelection();
-        }
-        Hud.applyStageHotbar(session);
     }
 
     public void onInventoryPreClick(InventoryPreClickEvent event) {
@@ -251,7 +301,28 @@ public final class Mazeward implements Stage.Listener {
         Instance instance = player.getInstance();
 
         if (instance == lobby) {
-            startRun(player);
+            if (waitingRoom.contains(player)) {
+                switch (player.getHeldSlot()) {
+                    case 0 -> startFromWaitingRoom(player);
+                    case 1 -> openPlayerCountMenu(session);
+                    case 8 -> player.teleport(new Pos(0.5, LOBBY_Y + 1, 0.5));
+                    default -> {
+                    }
+                }
+                return;
+            }
+            if (player.getHeldSlot() == 1) {
+                player.teleport(WaitingRoom.ENTRY);
+                player.sendMessage(Component.text(
+                        "待機部屋に入りました。人がそろったら緑のアイテムを右クリック",
+                        NamedTextColor.AQUA));
+            } else {
+                startRun(player);
+            }
+            return;
+        }
+        if (versus != null && instance == versusInstance) {
+            versusAction(session);
             return;
         }
         if (instance == roadmap) {
@@ -264,7 +335,7 @@ public final class Mazeward implements Stage.Listener {
 
         int slot = player.getHeldSlot();
         switch (slot) {
-            case PlayerSession.SLOT_TOWER_SHOP -> Menus.openTowerShop(session);
+            case PlayerSession.SLOT_TOGGLE -> toggleHand(session);
             case PlayerSession.SLOT_INSPECT -> {
                 Vec2i cell = session.inspectCell();
                 if (cell != null) {
@@ -288,6 +359,264 @@ public final class Mazeward implements Stage.Listener {
         }
     }
 
+    // ================================================================ 待機部屋
+
+    /**
+     * 部屋の出入りを見張る。
+     *
+     * <p>入退室のイベントは無いので、位置を見て変化した瞬間だけ処理する。
+     * 毎 tick 名簿を貼り替えると、文字が点滅して読めない。</p>
+     */
+    private void tickWaitingRoom(PlayerSession session) {
+        Player player = session.player();
+        boolean inside = waitingRoom.contains(player);
+        boolean listed = waitingParty.contains(player.getUuid());
+        if (inside == listed) {
+            return;
+        }
+        if (inside) {
+            waitingParty.add(player.getUuid());
+        } else {
+            waitingParty.remove(player.getUuid());
+            Hud.applyLobbyHotbar(player);
+        }
+        refreshWaitingRoom();
+    }
+
+    private void refreshWaitingRoom() {
+        List<Player> party = waitingPlayers();
+        waitingRoom.updateBoard(party.stream().map(Player::getUsername).toList());
+        for (Player member : party) {
+            Hud.applyWaitingHotbar(member, party.size());
+        }
+    }
+
+    private List<Player> waitingPlayers() {
+        List<Player> party = new ArrayList<>();
+        for (UUID id : waitingParty) {
+            PlayerSession session = sessions.get(id);
+            if (session != null && session.player().getInstance() == lobby) {
+                party.add(session.player());
+            }
+        }
+        return party;
+    }
+
+    private void startFromWaitingRoom(Player presser) {
+        List<Player> party = waitingPlayers();
+        if (party.size() < 2) {
+            presser.sendActionBar(Component.text(
+                    "2 人以上必要です（ひとりで試すなら「ボットで埋める」）", NamedTextColor.RED));
+            return;
+        }
+        if (party.size() > WaitingRoom.CAPACITY) {
+            party = party.subList(0, WaitingRoom.CAPACITY);
+        }
+        waitingParty.clear();
+        startVersus(party, 0);
+    }
+
+    // ================================================================ 対戦
+
+    private VersusPlayer versusPlayerOf(Player player) {
+        return versus == null ? null : versusHumans.get(player.getUuid());
+    }
+
+    /** 人数を選ぶ。相手は自分の操作をそのまま真似するボットが埋める。 */
+    private void openPlayerCountMenu(PlayerSession session) {
+        List<Menus.Option> options = new ArrayList<>();
+        for (int count : new int[] {2, 3, 4, 5, 6, 8}) {
+            int players = count;
+            options.add(new Menus.Option(
+                    Hud.item(Material.PLAYER_HEAD,
+                            Component.text(players + " 人で対戦", NamedTextColor.GOLD),
+                            Component.text("あなた + ボット " + (players - 1) + " 人",
+                                    NamedTextColor.GRAY),
+                            Component.text("ボットはあなたの操作をそのまま真似します",
+                                    NamedTextColor.DARK_GRAY)),
+                    () -> startVersus(session.player(), players)));
+        }
+        Menus.openChoice(session, Component.text("対戦の人数を選ぶ"), options, false);
+    }
+
+    /** ボットだけで人数を埋めるデバッグ用の開始。 */
+    private void startVersus(Player player, int playerCount) {
+        startVersus(List.of(player), playerCount - 1);
+    }
+
+    /**
+     * 対戦を始める。
+     *
+     * @param humans  参加する人。全員がそれぞれ島を 1 つ持つ
+     * @param botFill 足りないぶんを埋めるミラーボットの数（デバッグ用。通常は 0）
+     */
+    private void startVersus(List<Player> humans, int botFill) {
+        cleanupVersus();
+
+        versusInstance = MinecraftServer.getInstanceManager()
+                .createInstanceContainer(DimensionType.OVERWORLD);
+        versusInstance.setGenerator(unit -> {
+        });
+        versusInstance.setTime(6000);
+        versusInstance.setTimeRate(0);
+
+        int playerCount = humans.size() + botFill;
+        long seed = new Random().nextLong();
+        versus = new VersusMatch(versusInstance, seed, playerCount, this::onMatchEnded);
+        matchEndedTick = -1;
+
+        for (Player human : humans) {
+            VersusPlayer participant = new VersusPlayer(human.getUsername(), human, false);
+            versus.addParticipant(participant);
+            versusHumans.put(human.getUuid(), participant);
+        }
+        for (int i = 1; i <= botFill; i++) {
+            VersusPlayer bot = new VersusPlayer("ボット" + i, null, true);
+            versus.addParticipant(bot);
+            // 遅延をずらす。全員が同時に同じ手を打つと送りが一斉に来て事故になる
+            bots.add(new MirrorBot(bot, 20 + i * 25));
+        }
+
+        for (Player human : humans) {
+            VersusPlayer participant = versusHumans.get(human.getUuid());
+            PlayerSession session = session(human);
+            human.setInstance(versusInstance, versus.overviewOf(participant));
+            preparePlayer(human);
+            session.enterStage(participant.island());
+            participant.island().addPlayer(human);
+            if (!participant.deck().hand().isEmpty()) {
+                human.setHeldItemSlot((byte) 0);
+                session.selectCard(0);
+            }
+            VersusHud.applyHotbar(session, participant, versus);
+
+            human.sendMessage(Component.text("── 対戦 " + playerCount + " 人 ──",
+                    NamedTextColor.GOLD, TextDecoration.BOLD));
+            human.sendMessage(Component.text(
+                    "地形は全員同じ。飛べば相手の島を見に行けます（干渉はできません）",
+                    NamedTextColor.AQUA));
+            human.sendMessage(Component.text(
+                    "インカムが増えるのは敵を送ったときだけ。守るか伸ばすかが勝負どころ",
+                    NamedTextColor.YELLOW));
+            human.sendMessage(Component.text(
+                    "準備 60 秒のあいだに迷路とタワーを組んでください", NamedTextColor.GRAY));
+        }
+    }
+
+    /** 対戦中の右クリック。 */
+    private void versusAction(PlayerSession session) {
+        Player player = session.player();
+        VersusPlayer self = versusPlayerOf(player);
+        if (self == null || !self.alive()) {
+            return;
+        }
+        switch (player.getHeldSlot()) {
+            case PlayerSession.SLOT_TOGGLE -> toggleHand(session);
+            case PlayerSession.SLOT_INSPECT -> {
+                Vec2i cell = session.inspectCell();
+                if (cell != null) {
+                    Menus.openTowerDetail(session, cell);
+                }
+            }
+            case VersusHud.SLOT_SEND -> VersusHud.openSendMenu(session, self, versus);
+            default -> {
+                var outcome = session.confirm();
+                Hud.feedback(player, outcome);
+                if (outcome.success()) {
+                    recordForBots(session);
+                    if (session.mode() == PlayerSession.Mode.CARD) {
+                        session.reselectAfterPlay();
+                    }
+                }
+                VersusHud.applyHotbar(session, self, versus);
+            }
+        }
+    }
+
+    /** 人間が置いたものをボットのキューへ積む。 */
+    private void recordForBots(PlayerSession session) {
+        PlayerSession.Placement placement = session.takeLastPlacement();
+        if (placement == null || versus == null) {
+            return;
+        }
+        MirrorBot.Action action = placement.mode() == PlayerSession.Mode.CARD
+                ? new MirrorBot.Action.PlaceCard(placement.shape(), placement.origin(), placement.rot())
+                : new MirrorBot.Action.PlaceTower(placement.tower(), placement.origin(), placement.rot());
+        for (MirrorBot bot : bots) {
+            bot.record(action, versus.elapsedTicks());
+        }
+    }
+
+    private void onMatchEnded(VersusMatch match, VersusPlayer winner) {
+        matchEndedTick = tick;
+        for (PlayerSession session : sessions.values()) {
+            Player player = session.player();
+            player.sendMessage(winner == null
+                    ? Component.text("引き分けで終了しました", NamedTextColor.GRAY)
+                    : Component.text(winner.name() + " の勝利！", NamedTextColor.GOLD, TextDecoration.BOLD));
+        }
+    }
+
+    private void cleanupVersus() {
+        if (versus != null) {
+            versus.dispose();
+            versus = null;
+        }
+        bots.clear();
+        versusHumans.clear();
+        matchEndedTick = -1;
+        for (PlayerSession session : sessions.values()) {
+            session.leaveStage();
+        }
+        if (versusInstance != null) {
+            InstanceContainer previous = versusInstance;
+            versusInstance = null;
+            MinecraftServer.getInstanceManager().unregisterInstance(previous);
+        }
+    }
+
+    private void tickVersus() {
+        versus.tick();
+        for (MirrorBot bot : bots) {
+            bot.tick(versus.elapsedTicks(), versus);
+        }
+        for (PlayerSession session : sessions.values()) {
+            VersusPlayer self = versusPlayerOf(session.player());
+            if (session.field() == null || self == null) {
+                continue;
+            }
+            session.syncSelectionWithHotbar();
+            session.tick(tick);
+            if (tick % 10 == 0) {
+                VersusHud.updateSidebar(session, self, versus);
+            }
+            if (tick % 40 == 0) {
+                VersusHud.applyHotbar(session, self, versus);
+            }
+        }
+
+        // 決着してもその場に留まると、次の試合を始められない
+        if (matchEndedTick >= 0 && tick - matchEndedTick > 100) {
+            returnEveryoneToLobby();
+        }
+    }
+
+    private void returnEveryoneToLobby() {
+        List<Player> players = new ArrayList<>();
+        for (UUID id : versusHumans.keySet()) {
+            PlayerSession session = sessions.get(id);
+            if (session != null) {
+                players.add(session.player());
+            }
+        }
+        cleanupVersus();
+        for (Player player : players) {
+            player.setInstance(lobby, new Pos(0.5, LOBBY_Y + 1, 0.5));
+            preparePlayer(player);
+            Hud.applyLobbyHotbar(player);
+        }
+    }
+
     // ================================================================ 毎 tick
 
     public void tick() {
@@ -304,6 +633,11 @@ public final class Mazeward implements Stage.Listener {
     private void tickInternal() {
         tick++;
 
+        if (versus != null) {
+            tickVersus();
+            return;
+        }
+
         if (stage != null) {
             stage.tick();
         }
@@ -318,6 +652,8 @@ public final class Mazeward implements Stage.Listener {
                 session.tick(tick);
             } else if (player.getInstance() == roadmap) {
                 checkRoadmapEntry(session);
+            } else if (player.getInstance() == lobby) {
+                tickWaitingRoom(session);
             }
             if (tick % 10 == 0) {
                 Hud.updateSidebar(session, run);
@@ -762,15 +1098,17 @@ public final class Mazeward implements Stage.Listener {
                 }
                 default -> {
                     title = "地の裂け目";
-                    options.add(new Menus.Option(
-                            Hud.item(Material.BRICK,
-                                    Component.text("覗き込んで足場を確かめる", NamedTextColor.YELLOW),
-                                    Component.text("手札の上限 +1", NamedTextColor.GRAY)),
-                            () -> {
-                                run.deck().increaseHandSize(1);
-                                broadcast(Component.text("手札の上限が増えた", NamedTextColor.YELLOW));
-                                advanceAfterReward();
-                            }));
+                    options.add(run.deck().canIncreaseHandSize()
+                            ? new Menus.Option(
+                                    Hud.item(Material.BRICK,
+                                            Component.text("覗き込んで足場を確かめる", NamedTextColor.YELLOW),
+                                            Component.text("手札の上限 +1", NamedTextColor.GRAY)),
+                                    () -> {
+                                        run.deck().increaseHandSize(1);
+                                        broadcast(Component.text("手札の上限が増えた", NamedTextColor.YELLOW));
+                                        advanceAfterReward();
+                                    })
+                            : goldOption(90, "覗き込んで足場を確かめる"));
                     options.add(goldOption(120, "落ちている物を拾い集める"));
                 }
             }
@@ -970,14 +1308,16 @@ public final class Mazeward implements Stage.Listener {
                         broadcast(Component.text("コアを修復しました", NamedTextColor.GREEN));
                         advanceAfterReward();
                     }));
-            options.add(new Menus.Option(
-                    Hud.item(Material.BRICK, Component.text("手札の上限 +1", NamedTextColor.YELLOW),
-                            Component.text("毎ターン使えるカードが増える", NamedTextColor.GRAY)),
-                    () -> {
-                        run.deck().increaseHandSize(1);
-                        broadcast(Component.text("手札上限が増えました", NamedTextColor.YELLOW));
-                        advanceAfterReward();
-                    }));
+            options.add(run.deck().canIncreaseHandSize()
+                    ? new Menus.Option(
+                            Hud.item(Material.BRICK, Component.text("手札の上限 +1", NamedTextColor.YELLOW),
+                                    Component.text("毎ターン使えるカードが増える", NamedTextColor.GRAY)),
+                            () -> {
+                                run.deck().increaseHandSize(1);
+                                broadcast(Component.text("手札上限が増えました", NamedTextColor.YELLOW));
+                                advanceAfterReward();
+                            })
+                    : goldOption(90, "予備の資材をかき集める"));
             options.add(new Menus.Option(
                     blessing == null
                             ? Hud.item(Material.BLAZE_POWDER, Component.text("エンバー +110", NamedTextColor.GOLD))

@@ -16,6 +16,7 @@ public final class TowerInstance {
     private final double centerZ;
 
     private int level;
+    private TowerKind.Spec spec;
     private int investedGold;
     private int cooldown;
     private Entity label;
@@ -70,16 +71,29 @@ public final class TowerInstance {
     }
 
     public TowerKind.Stats stats() {
-        return kind.statsAt(level);
+        return kind.statsAt(level, spec);
+    }
+
+    /** 最終段階で選んだ特化。未選択なら null。 */
+    public TowerKind.Spec spec() {
+        return spec;
+    }
+
+    /** 次の強化が「特化を選ぶ」段階か。 */
+    public boolean nextIsSpecialization() {
+        return level == TowerKind.MAX_LEVEL - 1;
     }
 
     public int nextUpgradeCost() {
         return maxed() ? -1 : kind.upgradeCost(level);
     }
 
-    public void upgrade(int cost) {
+    public void upgrade(int cost, TowerKind.Spec chosen) {
         level++;
         investedGold += cost;
+        if (chosen != null) {
+            spec = chosen;
+        }
     }
 
     public int sellValue() {

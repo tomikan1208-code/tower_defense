@@ -22,7 +22,11 @@ public enum TowerKind {
             Element.NONE, AttackStyle.SINGLE,
             30, 5.5, 12, 7.0,
             0.0, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_ARROW_SHOOT, 1.5f, Material.ARROW, 0.7f),
+            SoundEvent.ENTITY_ARROW_SHOOT, 1.5f, Material.ARROW, 0.7f,
+            new Spec("狙撃", "射程が大きく伸び、一撃が重くなる。代わりに遅い",
+                    1.5, 6.0, 1.7, 0, 0, 0, 0),
+            new Spec("連射", "攻撃間隔が半分以下になる。代わりに一撃は軽い",
+                    0.85, 0, 0.45, 0, 0, 0, 0)),
 
     FROST(
             "氷塔", "ダメージは低いが 40% 減速。キルゾーンの滞在時間を伸ばす。",
@@ -30,7 +34,11 @@ public enum TowerKind {
             Element.ICE, AttackStyle.SINGLE,
             45, 5.0, 18, 3.0,
             0.0, 0, 0.40, 45, 0.0, 0,
-            SoundEvent.BLOCK_GLASS_BREAK, 1.6f, Material.SNOWBALL, 0.7f),
+            SoundEvent.BLOCK_GLASS_BREAK, 1.6f, Material.SNOWBALL, 0.7f,
+            new Spec("極低温", "減速がさらに 25% 深くなる",
+                    1.0, 0, 1.0, 0, 0, 0.25, 0),
+            new Spec("霜害", "減速はそのままに、攻撃力が 3 倍になる",
+                    3.0, 0, 1.0, 0, 0, 0, 0)),
 
     BRAZIER(
             "火炉", "射程内の経路を燃焼帯に変える。弾を撃たず、通過する敵を焼き続ける。",
@@ -38,7 +46,11 @@ public enum TowerKind {
             Element.FIRE, AttackStyle.AURA,
             60, 3.6, 20, 0.0,
             0.0, 0, 0.0, 0, 5.0, 60,
-            SoundEvent.ITEM_FIRECHARGE_USE, 0.8f, null, 0f),
+            SoundEvent.ITEM_FIRECHARGE_USE, 0.8f, null, 0f,
+            new Spec("業火", "燃焼ダメージが 2.2 倍になる",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 2.2),
+            new Spec("灼熱地帯", "燃焼帯の範囲が大きく広がる",
+                    1.0, 3.0, 1.0, 0, 0, 0, 0)),
 
     CANNON(
             "砲塔", "低速・高ダメージの範囲攻撃。敵が密集する折り返しに置く。",
@@ -46,7 +58,11 @@ public enum TowerKind {
             Element.FIRE, AttackStyle.SPLASH,
             110, 6.5, 40, 26.0,
             2.2, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_FIREWORK_ROCKET_BLAST, 0.7f, Material.FIRE_CHARGE, 0.9f),
+            SoundEvent.ENTITY_FIREWORK_ROCKET_BLAST, 0.7f, Material.FIRE_CHARGE, 0.9f,
+            new Spec("大口径", "爆発の範囲が大きく広がり、威力も上がる",
+                    1.3, 0, 1.0, 2.0, 0, 0, 0),
+            new Spec("焼夷", "着弾した敵を燃やし続ける",
+                    1.0, 0, 1.0, 0, 0, 0, 14.0)),
 
     TESLA(
             "雷塔", "3 体に連鎖する。蛇行迷路で経路が平行に並ぶほど強い。",
@@ -54,7 +70,11 @@ public enum TowerKind {
             Element.ARC, AttackStyle.CHAIN,
             130, 5.0, 22, 11.0,
             0.0, 3, 0.0, 0, 0.0, 0,
-            SoundEvent.BLOCK_CONDUIT_ATTACK_TARGET, 1.7f, Material.AMETHYST_SHARD, 0.7f),
+            SoundEvent.BLOCK_CONDUIT_ATTACK_TARGET, 1.7f, Material.AMETHYST_SHARD, 0.7f,
+            new Spec("拡散", "連鎖する数が 3 体増える。蛇行迷路で真価を発揮する",
+                    0.8, 0, 1.0, 0, 3, 0, 0),
+            new Spec("過負荷", "連鎖を捨てて、1 体への威力を 2 倍にする",
+                    2.0, 0, 1.0, 0, -2, 0, 0)),
 
     BALLISTA(
             "弩塔", "射程が極端に長く、直線上の敵を貫く。飛行の直線ルートの見張りに。",
@@ -62,7 +82,11 @@ public enum TowerKind {
             Element.NONE, AttackStyle.PIERCE,
             100, 12.0, 50, 30.0,
             0.0, 3, 0.0, 0, 0.0, 0,
-            SoundEvent.ITEM_CROSSBOW_SHOOT, 0.9f, Material.SPECTRAL_ARROW, 1.0f);
+            SoundEvent.ITEM_CROSSBOW_SHOOT, 0.9f, Material.SPECTRAL_ARROW, 1.0f,
+            new Spec("長距離", "射程がさらに 8 伸びる。盤面のどこへでも届く",
+                    1.0, 8.0, 1.0, 0, 0, 0, 0),
+            new Spec("貫通強化", "貫く数が 3 体増え、威力も上がる",
+                    1.2, 0, 1.0, 0, 3, 0, 0));
 
     public static final int MAX_LEVEL = 3;
 
@@ -87,6 +111,8 @@ public enum TowerKind {
     private final float firePitch;
     private final Material projectile;
     private final float projectileScale;
+    private final Spec specA;
+    private final Spec specB;
 
     TowerKind(String displayName, String description, Shape shape, Material icon, Block model,
               Element element, AttackStyle style,
@@ -94,7 +120,8 @@ public enum TowerKind {
               double splashRadius, int chainTargets,
               double slowFactor, int slowTicks, double burnDps, int burnTicks,
               SoundEvent fireSound, float firePitch,
-              Material projectile, float projectileScale) {
+              Material projectile, float projectileScale,
+              Spec specA, Spec specB) {
         this.displayName = displayName;
         this.description = description;
         this.shape = shape;
@@ -116,6 +143,13 @@ public enum TowerKind {
         this.firePitch = firePitch;
         this.projectile = projectile;
         this.projectileScale = projectileScale;
+        this.specA = specA;
+        this.specB = specB;
+    }
+
+    /** 最終段階で選べる 2 つの特化。 */
+    public List<Spec> specs() {
+        return List.of(specA, specB);
     }
 
     /** 実際に飛ばすアイテム。範囲効果の塔は弾を撃たないので null。 */
@@ -178,18 +212,59 @@ public enum TowerKind {
         return (int) Math.round(baseCost * (0.7 + 0.55 * (level + 1)));
     }
 
+    /**
+     * 最終段階で選ぶ特化。同じタワーが 2 つの別物に分かれる。
+     *
+     * <p>「伸ばすか、尖らせるか」を最後に一度だけ選ばせることで、
+     * 同じ構成でも盤面ごとに違う答えが出るようにするための仕組み。</p>
+     */
+    public record Spec(String displayName, String description,
+                       double damageMul, double rangeAdd, double cooldownMul,
+                       double splashAdd, int chainAdd, double slowAdd,
+                       double burnAdd, double burnMul) {
+
+        public Spec(String displayName, String description,
+                    double damageMul, double rangeAdd, double cooldownMul,
+                    double splashAdd, int chainAdd, double slowAdd, double burnAdd) {
+            this(displayName, description, damageMul, rangeAdd, cooldownMul,
+                    splashAdd, chainAdd, slowAdd, burnAdd, 1.0);
+        }
+    }
+
     public Stats statsAt(int level) {
+        return statsAt(level, null);
+    }
+
+    /**
+     * レベルと特化から実効性能を出す。
+     *
+     * @param spec 最終段階で選んだ特化。未選択なら null
+     */
+    public Stats statsAt(int level, Spec spec) {
         double levelMul = 1.0 + 0.55 * level;
-        return new Stats(
-                baseDamage * levelMul,
-                baseRange + 0.6 * level,
-                Math.max(2, (int) Math.round(baseCooldown * Math.pow(0.88, level))),
-                splashRadius + 0.25 * level,
-                chainTargets + (level >= 2 ? 1 : 0),
-                slowFactor > 0 ? Math.min(0.75, slowFactor + 0.05 * level) : 0.0,
-                slowTicks,
-                burnDps * levelMul,
-                burnTicks);
+        double damage = baseDamage * levelMul;
+        double range = baseRange + 0.6 * level;
+        int cooldown = Math.max(2, (int) Math.round(baseCooldown * Math.pow(0.88, level)));
+        double splash = splashRadius + 0.25 * level;
+        int chain = chainTargets + (level >= 2 ? 1 : 0);
+        double slow = slowFactor > 0 ? Math.min(0.75, slowFactor + 0.05 * level) : 0.0;
+        double burn = burnDps * levelMul;
+        int burnFor = burnTicks;
+
+        if (spec != null) {
+            damage *= spec.damageMul();
+            range += spec.rangeAdd();
+            cooldown = Math.max(2, (int) Math.round(cooldown * spec.cooldownMul()));
+            splash += spec.splashAdd();
+            chain = Math.max(1, chain + spec.chainAdd());
+            slow = slow > 0 ? Math.min(0.85, slow + spec.slowAdd()) : slow;
+            burn = burn * spec.burnMul() + spec.burnAdd();
+            if (burn > 0 && burnFor <= 0) {
+                burnFor = 60;
+            }
+        }
+
+        return new Stats(damage, range, cooldown, splash, chain, slow, slowTicks, burn, burnFor);
     }
 
     /**

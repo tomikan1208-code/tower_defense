@@ -15,7 +15,7 @@ import java.util.Set;
  * <p>レリックの効果はすべてここの modifier 系メソッドに集約してある。
  * 戦闘側は「素の値 + RunState の補正」だけを見ればよい。</p>
  */
-public final class RunState {
+public final class RunState implements Modifiers {
 
     /** ステージ開始時に配られるゴールドの基準値。 */
     private static final int STAGE_BASE_GOLD = 130;
@@ -280,7 +280,8 @@ public final class RunState {
     }
 
     public int handSize() {
-        return deck.baseHandSize() + (relics.contains(Relic.MASON_HAND) ? 1 : 0);
+        return Math.min(Deck.MAX_HAND_SIZE,
+                deck.baseHandSize() + (relics.contains(Relic.MASON_HAND) ? 1 : 0));
     }
 
     public int stageStartBonusGold() {

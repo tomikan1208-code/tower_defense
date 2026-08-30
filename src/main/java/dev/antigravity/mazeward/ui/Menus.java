@@ -163,66 +163,14 @@ public final class Menus {
         }, true);
     }
 
-    // ---------------------------------------------------------------- タワー一覧
-
-    public static void openTowerShop(PlayerSession session) {
-        Stage stage = session.stage();
-        if (stage == null) {
-            return;
-        }
-        List<TowerKind> unlocked = new ArrayList<>();
-        for (TowerKind kind : TowerKind.values()) {
-            if (stage.run().isUnlocked(kind)) {
-                unlocked.add(kind);
-            }
-        }
-
-        open(session, new Screen() {
-            @Override
-            public Component title() {
-                return Component.text("タワーを選ぶ  所持 " + stage.run().gold() + "G");
-            }
-
-            @Override
-            public InventoryType type() {
-                return InventoryType.CHEST_3_ROW;
-            }
-
-            @Override
-            public void render(PlayerSession s, Inventory inventory) {
-                for (int i = 0; i < unlocked.size(); i++) {
-                    inventory.setItemStack(10 + i, towerIcon(unlocked.get(i), stage.run().gold()));
-                }
-                for (TowerKind kind : TowerKind.values()) {
-                    if (!stage.run().isUnlocked(kind)) {
-                        continue;
-                    }
-                }
-                inventory.setItemStack(22, Hud.item(Material.BARRIER,
-                        Component.text("閉じる", NamedTextColor.RED)));
-            }
-
-            @Override
-            public void click(PlayerSession s, Inventory inventory, int slot) {
-                if (slot == 22) {
-                    s.clearMenu();
-                    s.player().closeInventory();
-                    return;
-                }
-                int index = slot - 10;
-                if (index < 0 || index >= unlocked.size()) {
-                    return;
-                }
-                TowerKind kind = unlocked.get(index);
-                s.clearMenu();
-                s.player().closeInventory();
-                s.selectTower(kind);
-                s.player().setHeldItemSlot((byte) PlayerSession.SLOT_SELECTED_TOWER);
-                Hud.applyStageHotbar(s);
-                s.player().sendActionBar(Component.text(
-                        kind.displayName() + " を選択  壁の上を狙って右クリック", kind.element().color()));
-            }
-        });
+    /** 最終段階の特化 1 つぶんのアイコン。 */
+    private static ItemStack specIcon(TowerKind.Spec spec, int cost, int gold) {
+        return Hud.item(Material.NETHER_STAR,
+                Component.text("特化: " + spec.displayName(), NamedTextColor.LIGHT_PURPLE),
+                Component.text(spec.description(), NamedTextColor.GRAY),
+                Component.empty(),
+                Component.text("一度選ぶと変更できません", NamedTextColor.DARK_GRAY),
+                Component.text(cost + "G", gold >= cost ? NamedTextColor.GREEN : NamedTextColor.RED));
     }
 
     private static ItemStack towerIcon(TowerKind kind, int gold) {
@@ -295,14 +243,23 @@ public final class Menus {
                                 + " — " + rune.description(), rune.color()));
                     }
                 }
+                String title = tower.spec() == null ? tower.kind().displayName()
+                        : tower.kind().displayName() + "・" + tower.spec().displayName();
                 inventory.setItemStack(13, Hud.item(tower.kind().icon(),
-                        Component.text(tower.kind().displayName() + " Lv" + (tower.level() + 1),
+                        Component.text(title + " Lv" + (tower.level() + 1),
                                 tower.kind().element().color()),
                         lore));
 
                 if (tower.maxed()) {
                     inventory.setItemStack(11, Hud.item(Material.BARRIER,
                             Component.text("最大レベル", NamedTextColor.GRAY)));
+                } else if (tower.nextIsSpecialization()) {
+                    // 最終段階。同じタワーが 2 つの別物に分かれるので、両方を並べて選ばせる
+                    int cost = (int) Math.round(tower.nextUpgradeCost()
+                            * stage.run().upgradeCostMultiplier());
+                    List<TowerKind.Spec> specs = tower.kind().specs();
+                    inventory.setItemStack(10, specIcon(specs.get(0), cost, stage.run().gold()));
+                    inventory.setItemStack(12, specIcon(specs.get(1), cost, stage.run().gold()));
                 } else {
                     int cost = (int) Math.round(tower.nextUpgradeCost() * stage.run().upgradeCostMultiplier());
                     TowerKind.Stats next = tower.kind().statsAt(tower.level() + 1);
@@ -327,7 +284,21 @@ public final class Menus {
             public void click(PlayerSession s, Inventory inventory, int slot) {
                 Player player = s.player();
                 switch (slot) {
+                    case 10, 12 -> {
+                        if (!tower.nextIsSpecialization()) {
+                            return;
+                        }
+                        TowerKind.Spec chosen = tower.kind().specs().get(slot == 10 ? 0 : 1);
+                        Stage.Outcome outcome = stage.upgradeTower(cell, chosen);
+                        Hud.feedback(player, outcome);
+                        if (outcome.success()) {
+                            render(s, inventory);
+                        }
+                    }
                     case 11 -> {
+                        if (tower.nextIsSpecialization()) {
+                            return;
+                        }
                         Stage.Outcome outcome = stage.upgradeTower(cell);
                         Hud.feedback(player, outcome);
                         if (outcome.success()) {

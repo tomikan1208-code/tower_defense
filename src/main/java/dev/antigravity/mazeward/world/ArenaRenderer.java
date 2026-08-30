@@ -34,10 +34,57 @@ public final class ArenaRenderer {
 
     private final Instance instance;
     private final Palette.Theme theme;
+    private final int originX;
+    private final int originZ;
 
     public ArenaRenderer(Instance instance, Palette.Theme theme) {
+        this(instance, theme, 0, 0);
+    }
+
+    /**
+     * @param originX 盤面の (0,0) をワールドのどこに置くか
+     * @param originZ 同上
+     *
+     * <p>対戦では 1 つのワールドに複数の島を並べるので、島ごとに原点がずれる。
+     * グリッド側は常に 0 始まりのままで、<b>ワールド座標との変換をここに集約している</b>。
+     * この 1 箇所を通していれば、盤面のロジックは島の位置を一切知らなくてよい。</p>
+     */
+    public ArenaRenderer(Instance instance, Palette.Theme theme, int originX, int originZ) {
         this.instance = instance;
         this.theme = theme;
+        this.originX = originX;
+        this.originZ = originZ;
+    }
+
+    public int originX() {
+        return originX;
+    }
+
+    public int originZ() {
+        return originZ;
+    }
+
+    /** グリッドの x → ワールドの x。 */
+    public double worldX(double gridX) {
+        return originX + gridX;
+    }
+
+    public double worldZ(double gridZ) {
+        return originZ + gridZ;
+    }
+
+    /** セル中心のワールド座標（x）。 */
+    public double centerX(Vec2i cell) {
+        return originX + cell.x() + 0.5;
+    }
+
+    public double centerZ(Vec2i cell) {
+        return originZ + cell.z() + 0.5;
+    }
+
+    /** コアの中心のワールド座標。 */
+    public Pos coreCenter(Grid grid, double y) {
+        return new Pos(originX + grid.coreCenterX(), y, originZ + grid.coreCenterZ());
     }
 
     public Instance instance() {
@@ -52,7 +99,7 @@ public final class ArenaRenderer {
 
     /** セルの中心のワールド座標。 */
     public Pos center(Vec2i cell, double y) {
-        return new Pos(cell.x() + 0.5, y, cell.z() + 0.5);
+        return new Pos(originX + cell.x() + 0.5, y, originZ + cell.z() + 0.5);
     }
 
     public Pos surfaceCenter(Vec2i cell) {
@@ -61,15 +108,7 @@ public final class ArenaRenderer {
 
     /** ワールド座標 → セル座標。 */
     public Vec2i toCell(double worldX, double worldZ) {
-        return new Vec2i((int) Math.floor(worldX), (int) Math.floor(worldZ));
-    }
-
-    public double cellCenterX(Vec2i cell) {
-        return cell.x() + 0.5;
-    }
-
-    public double cellCenterZ(Vec2i cell) {
-        return cell.z() + 0.5;
+        return new Vec2i((int) Math.floor(worldX - originX), (int) Math.floor(worldZ - originZ));
     }
 
     // ---------------------------------------------------------------- 描画
@@ -86,8 +125,8 @@ public final class ArenaRenderer {
                 if (inside) {
                     continue;
                 }
-                instance.setBlock(x, FLOOR_Y, z, theme.border());
-                instance.setBlock(x, FLOOR_Y - 1, z, Block.DEEPSLATE);
+                instance.setBlock(originX + x, FLOOR_Y, originZ + z, theme.border());
+                instance.setBlock(originX + x, FLOOR_Y - 1, originZ + z, Block.DEEPSLATE);
             }
         }
 
@@ -99,7 +138,7 @@ public final class ArenaRenderer {
                     continue;
                 }
                 for (int y = 0; y < BORDER_HEIGHT; y++) {
-                    instance.setBlock(x, SURFACE_Y + y, z, theme.border());
+                    instance.setBlock(originX + x, SURFACE_Y + y, originZ + z, theme.border());
                 }
             }
         }
@@ -117,8 +156,8 @@ public final class ArenaRenderer {
         int z = cell.z();
         CellType type = grid.get(cell);
 
-        instance.setBlock(x, FLOOR_Y - 1, z, Block.DEEPSLATE);
-        instance.setBlock(x, FLOOR_Y, z, floorBlockFor(type));
+        instance.setBlock(originX + x, FLOOR_Y - 1, originZ + z, Block.DEEPSLATE);
+        instance.setBlock(originX + x, FLOOR_Y, originZ + z, floorBlockFor(type));
 
         // 岩は自然地形なのでセル座標でばらけさせる。
         // 壁のほうは「置いたカードの素材」で塗り直されるので、ここでは既定値だけ置く。
@@ -128,10 +167,10 @@ public final class ArenaRenderer {
             default -> Block.AIR;
         };
         for (int y = 0; y < WALL_HEIGHT; y++) {
-            instance.setBlock(x, SURFACE_Y + y, z, column);
+            instance.setBlock(originX + x, SURFACE_Y + y, originZ + z, column);
         }
         // 壁の上（タワーが乗る面）は既定では空にする
-        instance.setBlock(x, WALL_TOP_Y, z, Block.AIR);
+        instance.setBlock(originX + x, WALL_TOP_Y, originZ + z, Block.AIR);
     }
 
     private Block floorBlockFor(CellType type) {
@@ -149,27 +188,27 @@ public final class ArenaRenderer {
      */
     public void paintWall(Vec2i cell, Block block) {
         for (int y = 0; y < WALL_HEIGHT; y++) {
-            instance.setBlock(cell.x(), SURFACE_Y + y, cell.z(), block);
+            instance.setBlock(originX + cell.x(), SURFACE_Y + y, originZ + cell.z(), block);
         }
     }
 
     /** タワーの模型ブロックを壁の上に置く。 */
     public void paintTower(Iterable<Vec2i> footprint, Block model) {
         for (Vec2i cell : footprint) {
-            instance.setBlock(cell.x(), WALL_TOP_Y, cell.z(), model);
+            instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), model);
         }
     }
 
     public void clearTower(Iterable<Vec2i> footprint) {
         for (Vec2i cell : footprint) {
-            instance.setBlock(cell.x(), WALL_TOP_Y, cell.z(), Block.AIR);
+            instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), Block.AIR);
         }
     }
 
     /** アリーナ全体を俯瞰できる観戦位置。 */
     public Pos overviewPos(Grid grid) {
-        double cx = grid.width() / 2.0;
-        double cz = grid.height() / 2.0;
+        double cx = originX + grid.width() / 2.0;
+        double cz = originZ + grid.height() / 2.0;
         double height = SURFACE_Y + Math.max(18, Math.max(grid.width(), grid.height()) * 0.95);
         return new Pos(cx, height, cz + grid.height() * 0.42, 0f, 62f);
     }
