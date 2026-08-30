@@ -20,136 +20,136 @@ public enum TowerKind {
 
     ARROW(
             "弓塔", "安価で手数が多い基礎火力。まずこれで骨組みを作る。",
-            Shapes.DOT, Material.BOW, Block.CHISELED_STONE_BRICKS, Model.of(EntityType.SKELETON, Look.of().hand(Material.BOW)),
-            Element.NONE, AttackStyle.SINGLE,
+            Shapes.DOT, Material.BOW, Block.STONE_BRICK_SLAB, Model.of(EntityType.SKELETON, Look.of().hand(Material.BOW)),
+            Element.NONE, AttackStyle.SINGLE, Targeting.FIRST,
             30, 5.5, 12, 7.0,
             0.0, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_ARROW_SHOOT, 1.5f, Material.ARROW, 0.7f,
+            SoundEvent.ENTITY_ARROW_SHOOT, 1.5f, EntityType.ARROW,
             new Spec("狙撃", "射程が大きく伸び、一撃が重くなる。代わりに遅い",
                     1.5, 6.0, 1.7, 0, 0, 0, 0)
                     .looking(Look.of().helmet(Material.CHAINMAIL_HELMET)
-                            .chestplate(Material.CHAINMAIL_CHESTPLATE).scale(1.15)),
+                            .chestplate(Material.CHAINMAIL_CHESTPLATE)),
             new Spec("連射", "攻撃間隔が半分以下になる。代わりに一撃は軽い",
                     0.85, 0, 0.45, 0, 0, 0, 0)
                     .looking(Look.of().helmet(Material.GOLDEN_HELMET)
-                            .chestplate(Material.GOLDEN_CHESTPLATE).scale(0.95))),
+                            .chestplate(Material.GOLDEN_CHESTPLATE))),
 
     FROST(
             "氷塔", "ダメージは低いが 40% 減速。キルゾーンの滞在時間を伸ばす。",
-            Shapes.DOT, Material.PACKED_ICE, Block.BLUE_ICE, Model.of(EntityType.SNOW_GOLEM),
-            Element.ICE, AttackStyle.SINGLE,
+            Shapes.DOT, Material.PACKED_ICE, Block.QUARTZ_SLAB, Model.of(EntityType.SNOW_GOLEM),
+            Element.ICE, AttackStyle.SINGLE, Targeting.UNAFFECTED,
             45, 5.0, 18, 3.0,
             0.0, 0, 0.40, 45, 0.0, 0,
-            SoundEvent.BLOCK_GLASS_BREAK, 1.6f, Material.SNOWBALL, 0.7f,
+            SoundEvent.BLOCK_GLASS_BREAK, 1.6f, EntityType.SNOWBALL,
             new Spec("極低温", "減速がさらに 25% 深くなる",
                     1.0, 0, 1.0, 0, 0, 0.25, 0)
-                    .looking(Look.of().helmet(Material.PACKED_ICE).scale(1.15)),
+                    .looking(Look.of().helmet(Material.PACKED_ICE)),
             new Spec("霜害", "減速はそのままに、攻撃力が 3 倍になる",
                     3.0, 0, 1.0, 0, 0, 0, 0)
-                    .looking(Look.of().helmet(Material.JACK_O_LANTERN).scale(1.3))),
+                    .looking(Look.of().helmet(Material.JACK_O_LANTERN))),
 
     BRAZIER(
             "火炉", "射程内の経路を燃焼帯に変える。弾を撃たず、通過する敵を焼き続ける。",
-            Shapes.I2, Material.CAMPFIRE, Block.MAGMA_BLOCK, Model.of(EntityType.BLAZE),
-            Element.FIRE, AttackStyle.AURA,
+            Shapes.I2, Material.CAMPFIRE, Block.NETHER_BRICK_SLAB, Model.of(EntityType.BLAZE),
+            Element.FIRE, AttackStyle.AURA, Targeting.NONE,
             60, 3.6, 20, 0.0,
             0.0, 0, 0.0, 0, 5.0, 60,
-            SoundEvent.ITEM_FIRECHARGE_USE, 0.8f, null, 0f,
+            SoundEvent.ITEM_FIRECHARGE_USE, 0.8f, null,
             new Spec("業火", "燃焼ダメージが 2.2 倍になる",
                     1.0, 0, 1.0, 0, 0, 0, 0, 2.2)
-                    .looking(Look.of().scale(1.4)),
+                    .looking(Look.of().tiers(2)),
             new Spec("灼熱地帯", "燃焼帯の範囲が大きく広がる",
                     1.0, 3.0, 1.0, 0, 0, 0, 0)
-                    .looking(Look.of().tiers(2))),
+                    .looking(Look.of().spreading())),
 
     CANNON(
             "砲塔", "低速・高ダメージの範囲攻撃。敵が密集する折り返しに置く。",
-            Shapes.O, Material.TNT, Block.BLAST_FURNACE, Model.of(EntityType.MAGMA_CUBE),
-            Element.FIRE, AttackStyle.SPLASH,
+            Shapes.O, Material.TNT, Block.POLISHED_DEEPSLATE_SLAB, Model.of(EntityType.MAGMA_CUBE),
+            Element.FIRE, AttackStyle.SPLASH, Targeting.TOUGHEST,
             110, 6.5, 40, 26.0,
             2.2, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_FIREWORK_ROCKET_BLAST, 0.7f, Material.FIRE_CHARGE, 0.9f,
+            SoundEvent.ENTITY_FIREWORK_ROCKET_BLAST, 0.7f, EntityType.SMALL_FIREBALL,
             new Spec("大口径", "爆発の範囲が大きく広がり、威力も上がる",
                     1.3, 0, 1.0, 2.0, 0, 0, 0)
                     .looking(Look.of().scale(1.45)),
             new Spec("焼夷", "着弾した敵を燃やし続ける",
                     1.0, 0, 1.0, 0, 0, 0, 14.0)
-                    .looking(Look.of().tiers(2))),
+                    .looking(Look.of().spreading())),
 
     TESLA(
             "雷塔", "3 体に連鎖する。蛇行迷路で経路が平行に並ぶほど強い。",
-            Shapes.O, Material.LIGHTNING_ROD, Block.COPPER_BLOCK, Model.of(EntityType.BREEZE),
-            Element.ARC, AttackStyle.CHAIN,
+            Shapes.O, Material.LIGHTNING_ROD, Block.CUT_COPPER_SLAB, Model.of(EntityType.BREEZE),
+            Element.ARC, AttackStyle.CHAIN, Targeting.DENSEST,
             130, 5.0, 22, 11.0,
             0.0, 3, 0.0, 0, 0.0, 0,
-            SoundEvent.BLOCK_CONDUIT_ATTACK_TARGET, 1.7f, Material.AMETHYST_SHARD, 0.7f,
+            SoundEvent.BLOCK_CONDUIT_ATTACK_TARGET, 1.7f, EntityType.WIND_CHARGE,
             new Spec("拡散", "連鎖する数が 3 体増える。蛇行迷路で真価を発揮する",
                     0.8, 0, 1.0, 0, 3, 0, 0)
-                    .looking(Look.of().tiers(2)),
+                    .looking(Look.of().spreading()),
             new Spec("過負荷", "連鎖を捨てて、1 体への威力を 2 倍にする",
                     2.0, 0, 1.0, 0, -2, 0, 0)
-                    .looking(Look.of().scale(1.45))),
+                    .looking(Look.of().tiers(2))),
 
     BALLISTA(
             "弩塔", "射程が極端に長く、直線上の敵を貫く。飛行の直線ルートの見張りに。",
-            Shapes.I3, Material.CROSSBOW, Block.DARK_OAK_WOOD, Model.villager(VillagerProfession.FLETCHER),
-            Element.NONE, AttackStyle.PIERCE,
+            Shapes.I3, Material.CROSSBOW, Block.DARK_OAK_SLAB, Model.villager(VillagerProfession.FLETCHER),
+            Element.NONE, AttackStyle.PIERCE, Targeting.FARTHEST,
             100, 12.0, 50, 30.0,
             0.0, 3, 0.0, 0, 0.0, 0,
-            SoundEvent.ITEM_CROSSBOW_SHOOT, 0.9f, Material.SPECTRAL_ARROW, 1.0f,
+            SoundEvent.ITEM_CROSSBOW_SHOOT, 0.9f, EntityType.SPECTRAL_ARROW,
             new Spec("長距離", "射程がさらに 8 伸びる。盤面のどこへでも届く",
                     1.0, 8.0, 1.0, 0, 0, 0, 0)
-                    .looking(Look.of().job(VillagerProfession.TOOLSMITH).scale(1.2)),
+                    .looking(Look.of().job(VillagerProfession.TOOLSMITH)),
             new Spec("貫通強化", "貫く数が 3 体増え、威力も上がる",
                     1.2, 0, 1.0, 0, 3, 0, 0)
-                    .looking(Look.of().job(VillagerProfession.WEAPONSMITH).scale(1.05))),
+                    .looking(Look.of().job(VillagerProfession.WEAPONSMITH))),
 
     // ---------------------------------------------------------------- 支援・妨害
 
     BANISHER(
             "送還塔", "敵を来た道へ押し戻す。削る力は無いが、キルゾーンを何度も通させる。",
-            Shapes.DOT, Material.ENDER_PEARL, Block.PURPUR_PILLAR, Model.of(EntityType.ENDERMAN),
-            Element.VOID, AttackStyle.BANISH,
+            Shapes.DOT, Material.ENDER_PEARL, Block.PURPUR_SLAB, Model.of(EntityType.ENDERMAN),
+            Element.VOID, AttackStyle.BANISH, Targeting.FIRST,
             75, 5.5, 55, 5.0,
             0.0, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_ENDERMAN_TELEPORT, 1.2f, Material.ENDER_PEARL, 0.6f,
+            SoundEvent.ENTITY_ENDERMAN_TELEPORT, 1.2f, EntityType.ENDER_PEARL,
             Effect.banish(4.0),
             new Spec("深淵送り", "押し戻す距離が 2 倍以上になる",
                     1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.banish(5.0))
-                    .looking(Look.of().helmet(Material.OBSIDIAN).scale(1.2)),
+                    .looking(Look.of().helmet(Material.OBSIDIAN)),
             new Spec("連続送還", "攻撃間隔が半分になる。押し戻す距離は変わらない",
                     1.0, 0, 0.5, 0, 0, 0, 0)
-                    .looking(Look.of().helmet(Material.CHORUS_FLOWER).scale(0.95))),
+                    .looking(Look.of().helmet(Material.CHORUS_FLOWER))),
 
     HEXER(
             "呪詛塔", "射程内の敵の守りを剥ぐ。自分は削らないが、周りの塔の火力が伸びる。",
-            Shapes.I2, Material.DRAGON_BREATH, Block.CRYING_OBSIDIAN, Model.of(EntityType.WITCH),
-            Element.HEX, AttackStyle.CURSE,
+            Shapes.I2, Material.DRAGON_BREATH, Block.POLISHED_BLACKSTONE_SLAB, Model.of(EntityType.WITCH),
+            Element.HEX, AttackStyle.CURSE, Targeting.NONE,
             95, 6.0, 30, 0.0,
             0.0, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.ENTITY_WITCH_AMBIENT, 1.1f, null, 0f,
+            SoundEvent.ENTITY_WITCH_AMBIENT, 1.1f, null,
             Effect.curse(0.35, 60),
             new Spec("深き呪い", "被ダメージ増加が 2 倍近くになる",
                     1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.curse(0.30, 0))
-                    .looking(Look.of().helmet(Material.WITHER_SKELETON_SKULL).scale(1.1)),
+                    .looking(Look.of().helmet(Material.WITHER_SKELETON_SKULL)),
             new Spec("広域呪詛", "射程が大きく広がる。盤面の大半を呪える",
                     1.0, 5.0, 1.0, 0, 0, 0, 0)
-                    .looking(Look.of().helmet(Material.BEACON).scale(1.25))),
+                    .looking(Look.of().helmet(Material.BEACON).spreading())),
 
     WATCHTOWER(
             "監視塔", "周りのタワーの威力と手数を上げる。自分は撃たない。",
-            Shapes.O, Material.BELL, Block.LODESTONE, Model.villager(VillagerProfession.NONE),
-            Element.NONE, AttackStyle.SUPPORT,
+            Shapes.O, Material.BELL, Block.SMOOTH_STONE_SLAB, Model.villager(VillagerProfession.NONE),
+            Element.NONE, AttackStyle.SUPPORT, Targeting.NONE,
             120, 5.0, 40, 0.0,
             0.0, 0, 0.0, 0, 0.0, 0,
-            SoundEvent.BLOCK_BELL_USE, 1.4f, null, 0f,
+            SoundEvent.BLOCK_BELL_USE, 1.4f, null,
             Effect.watch(0.30, 0.15),
             new Spec("号令", "威力の上乗せが 2 倍になる",
                     1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0.30, 0))
-                    .looking(Look.of().job(VillagerProfession.LIBRARIAN).scale(1.1)),
+                    .looking(Look.of().job(VillagerProfession.LIBRARIAN)),
             new Spec("展望", "射程が伸び、手数の上乗せが厚くなる",
                     1.0, 4.0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0, 0.15))
-                    .looking(Look.of().job(VillagerProfession.CARTOGRAPHER).scale(1.25)));
+                    .looking(Look.of().job(VillagerProfession.CARTOGRAPHER)));
 
     /**
      * 台座の上に立たせるエンティティ。
@@ -191,6 +191,7 @@ public enum TowerKind {
     private final Model model;
     private final Element element;
     private final AttackStyle style;
+    private final Targeting targeting;
     private final int baseCost;
     private final double baseRange;
     private final int baseCooldown;
@@ -203,35 +204,34 @@ public enum TowerKind {
     private final int burnTicks;
     private final SoundEvent fireSound;
     private final float firePitch;
-    private final Material projectile;
-    private final float projectileScale;
+    private final EntityType projectile;
     private final Effect effect;
     private final Spec specA;
     private final Spec specB;
 
     TowerKind(String displayName, String description, Shape shape, Material icon,
               Block pedestal, Model model,
-              Element element, AttackStyle style,
+              Element element, AttackStyle style, Targeting targeting,
               int baseCost, double baseRange, int baseCooldown, double baseDamage,
               double splashRadius, int chainTargets,
               double slowFactor, int slowTicks, double burnDps, int burnTicks,
               SoundEvent fireSound, float firePitch,
-              Material projectile, float projectileScale,
+              EntityType projectile,
               Spec specA, Spec specB) {
-        this(displayName, description, shape, icon, pedestal, model, element, style,
+        this(displayName, description, shape, icon, pedestal, model, element, style, targeting,
                 baseCost, baseRange, baseCooldown, baseDamage, splashRadius, chainTargets,
                 slowFactor, slowTicks, burnDps, burnTicks, fireSound, firePitch,
-                projectile, projectileScale, Effect.NONE, specA, specB);
+                projectile, Effect.NONE, specA, specB);
     }
 
     TowerKind(String displayName, String description, Shape shape, Material icon,
               Block pedestal, Model model,
-              Element element, AttackStyle style,
+              Element element, AttackStyle style, Targeting targeting,
               int baseCost, double baseRange, int baseCooldown, double baseDamage,
               double splashRadius, int chainTargets,
               double slowFactor, int slowTicks, double burnDps, int burnTicks,
               SoundEvent fireSound, float firePitch,
-              Material projectile, float projectileScale,
+              EntityType projectile,
               Effect effect, Spec specA, Spec specB) {
         this.displayName = displayName;
         this.description = description;
@@ -241,6 +241,7 @@ public enum TowerKind {
         this.model = model;
         this.element = element;
         this.style = style;
+        this.targeting = targeting;
         this.baseCost = baseCost;
         this.baseRange = baseRange;
         this.baseCooldown = baseCooldown;
@@ -254,7 +255,6 @@ public enum TowerKind {
         this.fireSound = fireSound;
         this.firePitch = firePitch;
         this.projectile = projectile;
-        this.projectileScale = projectileScale;
         this.effect = effect;
         this.specA = specA;
         this.specB = specB;
@@ -275,13 +275,14 @@ public enum TowerKind {
         return List.of(specA, specB);
     }
 
-    /** 実際に飛ばすアイテム。範囲効果の塔は弾を撃たないので null。 */
-    public Material projectile() {
+    /**
+     * 実際に飛ばすもの。範囲効果の塔は弾を撃たないので null。
+     *
+     * <p>アイテムの板ではなく矢や雪玉そのものを飛ばす。
+     * 矢は進行方向を向いてくれるので、何が飛んでいるのかが一目で分かる。</p>
+     */
+    public EntityType projectile() {
         return projectile;
-    }
-
-    public float projectileScale() {
-        return projectileScale;
     }
 
     /** 発射音。塔ごとに違う音にすると、目を離していても何が撃っているか分かる。 */
@@ -330,6 +331,11 @@ public enum TowerKind {
 
     public AttackStyle style() {
         return style;
+    }
+
+    /** 射程内の誰を狙うか。塔ごとに違うので、同じ場所に並べても仕事が分かれる。 */
+    public Targeting targeting() {
+        return targeting;
     }
 
     public int baseCost() {

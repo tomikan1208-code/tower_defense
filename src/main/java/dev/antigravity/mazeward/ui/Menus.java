@@ -238,6 +238,10 @@ public final class Menus {
                 List<Component> lore = new ArrayList<>();
                 lore.add(Component.text(String.format("射程 %.1f  間隔 %dt",
                         stats.range(), stats.cooldown()), NamedTextColor.WHITE));
+                if (tower.kind().targeting() != dev.antigravity.mazeward.tower.Targeting.NONE) {
+                    lore.add(Component.text("狙い: " + tower.kind().targeting().displayName()
+                            + " — " + tower.kind().targeting().description(), NamedTextColor.AQUA));
+                }
                 if (stats.damage() > 0) {
                     lore.add(Component.text(String.format("攻撃力 %.1f  推定 DPS %.1f",
                             stats.damage(), stats.dps()), NamedTextColor.WHITE));

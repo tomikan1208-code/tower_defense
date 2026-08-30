@@ -17,6 +17,9 @@ public final class EnemyInstance {
 
     private static final int NAME_REFRESH_TICKS = 4;
 
+    /** 延焼の数字の色。撃たれたぶんと見分けられるように、炎の色で出す。 */
+    private static final TextColor BURN_COLOR = NamedTextColor.GOLD;
+
     private final EnemyKind kind;
     private final Entity body;
     private final double maxHp;
@@ -263,6 +266,16 @@ public final class EnemyInstance {
     }
 
     /**
+     * 何かしらの効果が乗っているか。氷塔が「まだ掛かっていない敵」を選ぶのに使う。
+     *
+     * <p>減速の重ねがけは上書きにしかならないので、
+     * 掛かっている敵を撃ち続けるのは手数をそのまま捨てているのと同じ。</p>
+     */
+    public boolean affected() {
+        return slowTicks > 0 || burnTicks > 0 || vulnerableTicks > 0;
+    }
+
+    /**
      * 装甲・呪詛・庇護を通したうえで、実際に削れたぶんを返す。
      *
      * <p>順番に意味がある。装甲は固定引き算なので先に引き、
@@ -343,7 +356,11 @@ public final class EnemyInstance {
         }
         if (burnTicks > 0) {
             burnTicks--;
-            damageDirect(burnDps / 20.0);
+            // 1 tick 分は 0.5 に満たないので、そのままでは数字が出ない。
+            // 表示待ちに足しておけば、たまった分がまとめて 1 つの数字になる
+            double tickBurn = burnDps / 20.0;
+            damageDirect(tickBurn);
+            addPendingDamage(tickBurn, BURN_COLOR);
             if (burnTicks == 0) {
                 burnDps = 0.0;
             }

@@ -86,6 +86,8 @@ public final class Hud {
         lore.add(Component.empty());
         lore.add(Component.text(String.format("射程 %.1f  間隔 %dt", stats.range(), stats.cooldown()),
                 NamedTextColor.WHITE));
+        // 狙い方は塔ごとに違う。見えないと、同じ場所に並べる意味が分からない
+        lore.add(Component.text("狙い: " + kind.targeting().displayName(), NamedTextColor.AQUA));
         if (stats.dps() > 0) {
             lore.add(Component.text(String.format("DPS %.0f", stats.dps()), NamedTextColor.WHITE));
         }

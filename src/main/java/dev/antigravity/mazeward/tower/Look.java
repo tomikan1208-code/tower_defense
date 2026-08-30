@@ -21,38 +21,49 @@ import net.minestom.server.item.Material;
  * @param hand       手に持たせるもの
  * @param scale      大きさの倍率（重ねるときは掛け合わせる）
  * @param tiers      段数。2 なら上にもう 1 体、少し小さく積む
+ * @param spread     占有マス 1 つにつき 1 体ずつ並べるか。1x2 なら 2 体が横に並ぶ
  */
 public record Look(VillagerProfession profession, Material helmet, Material chestplate,
-                   Material hand, double scale, int tiers) {
+                   Material hand, double scale, int tiers, boolean spread) {
 
-    public static final Look PLAIN = new Look(null, null, null, null, 1.0, 1);
+    public static final Look PLAIN = new Look(null, null, null, null, 1.0, 1, false);
 
     public static Look of() {
         return PLAIN;
     }
 
     public Look job(VillagerProfession profession) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
     }
 
     public Look helmet(Material helmet) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
     }
 
     public Look chestplate(Material chestplate) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
     }
 
     public Look hand(Material hand) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
     }
 
     public Look scale(double scale) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
     }
 
     public Look tiers(int tiers) {
-        return new Look(profession, helmet, chestplate, hand, scale, tiers);
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, spread);
+    }
+
+    /**
+     * 占有マスごとに 1 体ずつ並べる。
+     *
+     * <p>1x2 や 2x2 の塔を <b>大きくして</b> 存在感を出すと、名前と性能の表示に被って読めなくなる。
+     * 占有マスに 1 体ずつ並べれば、大きさを変えずに「広い塔だ」と伝わる。</p>
+     */
+    public Look spreading() {
+        return new Look(profession, helmet, chestplate, hand, scale, tiers, true);
     }
 
     /** 基本の見た目に別の見た目を重ねる。指定のあるものだけ上書きし、倍率は掛け合わせる。 */
@@ -66,6 +77,7 @@ public record Look(VillagerProfession profession, Material helmet, Material ches
                 other.chestplate != null ? other.chestplate : chestplate,
                 other.hand != null ? other.hand : hand,
                 scale * other.scale,
-                Math.max(tiers, other.tiers));
+                Math.max(tiers, other.tiers),
+                spread || other.spread);
     }
 }

@@ -27,13 +27,13 @@ import net.minestom.server.item.Material;
  */
 public final class TowerModel {
 
-    /** マス数が増えるほど大きく見せる。台座と本体の大きさが釣り合っていないと張りぼてに見える。 */
-    private static final double SCALE_BASE = 0.85;
-    private static final double SCALE_PER_CELL = 0.18;
-    private static final double SCALE_PER_LEVEL = 0.10;
-    private static final double SCALE_MAX = 1.9;
-
-    /** 2 段目以降の縮み方。同じ大きさで積むと 2 体が重なっただけに見える。 */
+    /**
+     * 2 段目以降の縮み方。同じ大きさで積むと 2 体が重なっただけに見える。
+     *
+     * <p>大きさを変えるのは基本これと、砲塔の「大口径」だけ。
+     * マス数や強化段階で大きくしていた頃は、育った塔ほど頭上の名前と性能表示に被って
+     * かえって読めなくなっていた。<b>広さは台座と体の数で見せる</b>。</p>
+     */
     private static final double TIER_SHRINK = 0.72;
 
     private TowerModel() {
@@ -42,26 +42,28 @@ public final class TowerModel {
     /**
      * タワー本体を台座の上に立たせる。
      *
-     * <p>特化で「二段」を選んだ塔は 2 体になるので、まとめて返す。
-     * 先頭が本体（狙いを向けるのはこれ）。</p>
+     * <p>「二段」なら上に積み、「並べる」なら占有マス 1 つにつき 1 体置く。
+     * どちらでもない塔は footprint の中心に 1 体だけ。先頭が本体（狙いを向けるのはこれ）。</p>
      *
-     * @param look  基本の見た目に特化を重ねたもの
-     * @param at    台座天面の中心（足元）
-     * @param cells 占有マス数。大きい塔ほど本体も大きくする
-     * @param level 強化段階。育つほど少し大きくする
+     * @param look        基本の見た目に特化を重ねたもの
+     * @param cellCenters 占有マスそれぞれの天面中心
+     * @param center      footprint の中心（足元）
      */
     public static List<Entity> spawn(Instance instance, TowerKind kind, Look look,
-                                     Pos at, int cells, int level) {
-        double scale = Math.min(SCALE_MAX,
-                (SCALE_BASE + SCALE_PER_CELL * cells + SCALE_PER_LEVEL * level) * look.scale());
+                                     List<Pos> cellCenters, Pos center) {
+        List<Pos> bases = look.spread() ? cellCenters : List.of(center);
+        // 並べるときは 1 体が 1 マスぶんなので、大きさの基準も 1 マスで見る
+        int cellsPerBody = look.spread() ? 1 : cellCenters.size();
 
-        List<Entity> bodies = new ArrayList<>(look.tiers());
-        double y = at.y();
-        for (int tier = 0; tier < Math.max(1, look.tiers()); tier++) {
-            double tierScale = scale * Math.pow(TIER_SHRINK, tier);
-            LivingEntity body = create(instance, kind, look, at.withY(y), tierScale, cells);
-            bodies.add(body);
-            y += body.getBoundingBox().height() * tierScale;
+        List<Entity> bodies = new ArrayList<>(bases.size() * Math.max(1, look.tiers()));
+        for (Pos base : bases) {
+            double y = base.y();
+            for (int tier = 0; tier < Math.max(1, look.tiers()); tier++) {
+                double scale = look.scale() * Math.pow(TIER_SHRINK, tier);
+                LivingEntity body = create(instance, kind, look, base.withY(y), scale, cellsPerBody);
+                bodies.add(body);
+                y += body.getBoundingBox().height() * scale;
+            }
         }
         return bodies;
     }

@@ -14,9 +14,9 @@ import net.minestom.server.instance.block.Block;
  * ここより下（Minestom）は「ブロック座標」しか知らない。</p>
  *
  * <pre>
- *   y = 67    タワー本体（エンティティ）の足元（TOWER_STAND_Y）
  *   y = 67.5  飛行敵
- *   y = 66    タワーの台座ブロック（WALL_TOP_Y）
+ *   y = 66.5  タワー本体（エンティティ）の足元（TOWER_STAND_Y）
+ *   y = 66    タワーの台座（ハーフブロック。上半分は空く）
  *   y = 65    壁ブロック / 地上敵の足元（SURFACE_Y）
  *   y = 64    床ブロック（FLOOR_Y）
  * </pre>
@@ -30,8 +30,14 @@ public final class ArenaRenderer {
     public static final int SURFACE_Y = FLOOR_Y + 1;
     public static final int WALL_HEIGHT = 1;
     public static final int WALL_TOP_Y = SURFACE_Y + WALL_HEIGHT;
-    /** 台座の天面。タワーのエンティティはここに立つ。 */
-    public static final int TOWER_STAND_Y = WALL_TOP_Y + 1;
+    /**
+     * 台座の天面。タワーのエンティティはここに立つ。
+     *
+     * <p>台座はハーフブロックなので、壁の上に <b>半分だけ</b> 積み上がる。
+     * 丸ごと 1 ブロック積むと迷路の壁が二層に見えて、
+     * 上から俯瞰したときに「どこが壁でどこが塔か」が読みづらくなる。</p>
+     */
+    public static final double TOWER_STAND_Y = WALL_TOP_Y + 0.5;
     public static final int BORDER_HEIGHT = 2;
     public static final double FLYING_Y = SURFACE_Y + 2.5;
 
@@ -204,6 +210,7 @@ public final class ArenaRenderer {
      * 隣にもう 1 基置けると勘違いする。</p>
      */
     public void paintPedestal(Iterable<Vec2i> footprint, Block pedestal) {
+        // ハーフブロックは既定で下半分。壁の天面にぴったり乗る
         for (Vec2i cell : footprint) {
             instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), pedestal);
         }

@@ -18,6 +18,7 @@ import dev.antigravity.mazeward.enemy.Trait;
 import dev.antigravity.mazeward.tower.AttackStyle;
 import dev.antigravity.mazeward.tower.Effect;
 import dev.antigravity.mazeward.tower.TowerInstance;
+import dev.antigravity.mazeward.tower.Targeting;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
 import dev.antigravity.mazeward.world.Overlay;
@@ -91,6 +92,12 @@ public abstract class Battlefield {
     }
 
     protected static final int PATH_DRAW_INTERVAL = 3;
+
+    /** 「密集している」と見なす半径。範囲攻撃の巻き込みが期待できる距離。 */
+    private static final double CROWD_RADIUS = 3.0;
+
+    /** 燃えている敵に炎を出す間隔。毎 tick だと粒が多すぎて盤面が見えなくなる。 */
+    private static final int BURN_DRAW_INTERVAL = 4;
 
     /** ダメージ数字をまとめて出す間隔。1 発ごとに出すとエンティティが溢れる。 */
     protected static final int DAMAGE_FLUSH_INTERVAL = 8;
@@ -314,6 +321,9 @@ public abstract class Battlefield {
         }
 
         applyFieldRunes();
+        if (tick % BURN_DRAW_INTERVAL == 0) {
+            drawBurning();
+        }
         if (tick % DAMAGE_FLUSH_INTERVAL == 0) {
             flushDamageNumbers();
         }
@@ -870,8 +880,7 @@ public abstract class Battlefield {
 
     /** 塔から狙った先へアイテムを飛ばす。当たり判定は持たない見た目だけの弾。 */
     private void spawnShot(TowerInstance tower, Pos from, Pos to) {
-        Shot shot = Shot.spawn(instance, from, to,
-                tower.kind().projectile(), tower.kind().projectileScale());
+        Shot shot = Shot.spawn(instance, from, to, tower.kind().projectile());
         if (shot != null) {
             shots.add(shot);
         }
@@ -885,7 +894,6 @@ public abstract class Battlefield {
      */
     private void fireSupport(TowerInstance tower, TowerKind.Stats stats, double range) {
         tower.resetCooldown(stats.cooldown());
-        Overlay.drawRangeRing(players, towerWorldX(tower), towerWorldZ(tower), range);
     }
 
     /** 呪詛塔。削らずに、射程内の敵の被ダメージを増やす。 */
@@ -904,48 +912,99 @@ public abstract class Battlefield {
         }
         tower.resetCooldown(stats.cooldown());
         playFireSound(tower);
-        Overlay.drawRangeRing(players, towerWorldX(tower), towerWorldZ(tower), range);
     }
 
+    /**
+     * 火炉。弾を撃たず、射程内を燃焼帯に変える。
+     *
+     * <p>以前は射程の輪を出していたが、数秒おきに輪が現れては消えるので
+     * 盤面がちかちかしていた。輪は配置と検査のときだけにして、
+     * ここでは <b>燃えている敵そのもの</b> に炎を出す。
+     * どこまで焼けているかは、輪より敵を見たほうが早い。</p>
+     */
     private void fireAura(TowerInstance tower, TowerKind.Stats stats, double range) {
         tower.resetCooldown(stats.cooldown());
         playFireSound(tower);
         double burn = stats.burnDps();
-        boolean any = false;
         for (EnemyInstance enemy : enemies) {
             if (!enemy.alive()) {
                 continue;
             }
-            Pos pos = enemy.position();
-            if (distanceFromTower(tower, pos) <= range) {
+            if (distanceFromTower(tower, enemy.position()) <= range) {
                 enemy.applyBurn(burn, stats.burnTicks());
-                any = true;
             }
         }
-        if (any) {
-            Overlay.drawRangeRing(players, towerWorldX(tower), towerWorldZ(tower), range);
+        Overlay.drawBurst(players,
+                new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y + 0.9, towerWorldZ(tower)),
+                Particle.FLAME, 8, 0.35f);
+    }
+
+    /** 燃えている敵から炎を上げる。延焼が効いていることを数字より先に伝える。 */
+    private void drawBurning() {
+        if (players.isEmpty()) {
+            return;
+        }
+        for (EnemyInstance enemy : enemies) {
+            if (enemy.alive() && enemy.burning()) {
+                Pos at = enemy.position();
+                Overlay.drawBurst(players, at.withY(at.y() + 0.6), Particle.FLAME, 3, 0.25f);
+            }
         }
     }
 
+    /**
+     * 射程内から 1 体選ぶ。<b>選び方は塔ごとに違う</b>（{@link Targeting}）。
+     *
+     * <p>全部の塔が「コアにいちばん近い敵」を撃つと、種類を変えて並べても
+     * 弾が同じ 1 体に集まり、溶けかけの敵に overkill を重ねて後ろは素通りになる。</p>
+     *
+     * <p>同点はコアに近いほうを採る。どの狙い方でも最後の拠り所は「漏らさない」で、
+     * ここを進行距離ではなく残距離で見ているので、
+     * 戦闘中に経路を引き直しても優先順位が壊れない。</p>
+     */
     private EnemyInstance findTarget(TowerInstance tower, double range) {
+        Targeting mode = tower.kind().targeting();
         EnemyInstance best = null;
+        double bestScore = 0;
         double bestRemaining = Double.MAX_VALUE;
+
         for (EnemyInstance enemy : enemies) {
             if (!enemy.alive()) {
                 continue;
             }
-            Pos pos = enemy.position();
-            if (distanceFromTower(tower, pos) > range) {
+            double distance = distanceFromTower(tower, enemy.position());
+            if (distance > range) {
                 continue;
             }
-            // コアにいちばん近い敵を狙う（TD の定番かつ漏れに強い）。
-            // 進行距離ではなく残距離で見るので、戦闘中に経路を引き直しても優先順位が壊れない。
-            if (enemy.remaining() < bestRemaining) {
-                bestRemaining = enemy.remaining();
+            double score = switch (mode) {
+                case UNAFFECTED -> enemy.affected() ? 0.0 : 1.0;
+                case TOUGHEST -> enemy.hp();
+                case DENSEST -> crowdAround(enemy);
+                case FARTHEST -> distance;
+                default -> 0.0;
+            };
+            boolean better = best == null
+                    || score > bestScore + 1e-9
+                    || (score > bestScore - 1e-9 && enemy.remaining() < bestRemaining);
+            if (better) {
                 best = enemy;
+                bestScore = score;
+                bestRemaining = enemy.remaining();
             }
         }
         return best;
+    }
+
+    /** その敵の周りにいる敵の数。範囲・連鎖の巻き込みがいちばん増える一体を探すのに使う。 */
+    private int crowdAround(EnemyInstance enemy) {
+        int count = 0;
+        Pos origin = enemy.position();
+        for (EnemyInstance other : enemies) {
+            if (other.alive() && other.position().distance(origin) <= CROWD_RADIUS) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private EnemyInstance nearestUnhit(EnemyInstance from, List<EnemyInstance> alreadyHit) {
@@ -1312,9 +1371,12 @@ public abstract class Battlefield {
      */
     private void attachTowerBody(TowerInstance tower) {
         removeTowerBodies(tower);
-        List<Entity> bodies = TowerModel.spawn(instance, tower.kind(), tower.look(),
-                new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y, towerWorldZ(tower)),
-                tower.footprint().size(), tower.level());
+        List<Pos> cellCenters = new ArrayList<>(tower.footprint().size());
+        for (Vec2i cell : tower.footprint()) {
+            cellCenters.add(arena.center(cell, ArenaRenderer.TOWER_STAND_Y));
+        }
+        List<Entity> bodies = TowerModel.spawn(instance, tower.kind(), tower.look(), cellCenters,
+                new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y, towerWorldZ(tower)));
         tower.setBodies(bodies);
         ownedEntities.addAll(bodies);
     }

@@ -145,23 +145,6 @@ public final class Overlay {
 
     // ---------------------------------------------------------------- 射程・弾道
 
-    public static void drawRangeRing(Collection<Player> viewers, double centerX, double centerZ, double radius) {
-        if (viewers.isEmpty()) {
-            return;
-        }
-        Particle dust = Palette.DUST.withColor(Palette.RANGE_RING).withScale(1.0f);
-        int steps = Math.max(16, (int) (radius * 9));
-        double y = ArenaRenderer.SURFACE_Y + 0.6;
-        for (int i = 0; i < steps; i++) {
-            double angle = 2 * Math.PI * i / steps;
-            double x = centerX + Math.cos(angle) * radius;
-            double z = centerZ + Math.sin(angle) * radius;
-            for (Player viewer : viewers) {
-                viewer.sendPacket(new ParticlePacket(dust, true, false, x, y, z, 0f, 0f, 0f, 0f, 0));
-            }
-        }
-    }
-
     /** タワー → 敵の弾道。エンティティを作らずパーティクルの線で表す（軽い）。 */
     public static void drawTracer(Collection<Player> viewers, Pos from, Pos to, Color color, float scale) {
         if (viewers.isEmpty()) {
@@ -249,6 +232,10 @@ public final class Overlay {
         private Entity label;
         private boolean visible;
 
+        // 同じ内容を毎 tick 送り直すと、文字がわずかに揺れて「ちかちか」して見える
+        private Component lastLabelText;
+        private Pos lastLabelPos;
+
         public GhostView(Player owner, Instance instance) {
             this.owner = owner;
             this.instance = instance;
@@ -293,9 +280,49 @@ public final class Overlay {
                 label = createLabel(instance, labelPos, labelText, 1.2f);
                 label.setAutoViewable(false);
             } else {
-                label.teleport(labelPos);
-                updateLabel(label, labelText);
+                if (!samePoint(labelPos, lastLabelPos)) {
+                    label.teleport(labelPos);
+                }
+                if (!labelText.equals(lastLabelText)) {
+                    updateLabel(label, labelText);
+                }
             }
+            lastLabelText = labelText;
+            lastLabelPos = labelPos;
+            label.addViewer(owner);
+        }
+
+        /**
+         * ブロックを出さず、文字だけを浮かべる。
+         *
+         * <p>内容も位置も変わっていないときは <b>何も送らない</b>。
+         * 同じテキストを毎 tick 送り直すと、文字がわずかに揺れてちかちかする。</p>
+         */
+        public void showLabel(Component text, double x, double y, double z) {
+            visible = true;
+            for (Entity entity : blocks) {
+                entity.removeViewer(owner);
+            }
+            if (text == null) {
+                if (label != null) {
+                    label.removeViewer(owner);
+                }
+                return;
+            }
+            Pos labelPos = new Pos(x, y, z);
+            if (label == null) {
+                label = createLabel(instance, labelPos, text, 1.2f);
+                label.setAutoViewable(false);
+            } else {
+                if (!samePoint(labelPos, lastLabelPos)) {
+                    label.teleport(labelPos);
+                }
+                if (!text.equals(lastLabelText)) {
+                    updateLabel(label, text);
+                }
+            }
+            lastLabelText = text;
+            lastLabelPos = labelPos;
             label.addViewer(owner);
         }
 
@@ -324,6 +351,10 @@ public final class Overlay {
             visible = false;
         }
 
+        private static boolean samePoint(Pos a, Pos b) {
+            return b != null && a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
+        }
+
         private void ensureCapacity(int size, Block block) {
             while (blocks.size() < size) {
                 Entity entity = new Entity(EntityType.BLOCK_DISPLAY);
@@ -338,6 +369,107 @@ public final class Overlay {
                     meta.setBrightness(15, 15);
                 });
                 blocks.add(entity);
+            }
+        }
+    }
+
+    /**
+     * 射程の輪。<b>パーティクルではなくブロック表示で描く。</b>
+     *
+     * <p>ダスト粒は 1 粒ずつ寿命がばらつくので、同じ輪を数 tick おきに描き直すと
+     * 消えるタイミングがずれてちかちかする。狙いを定めているあいだ
+     * ずっと見ている輪でそれが起きると、ただの雑音になる。</p>
+     *
+     * <p>中心と半径が変わらないかぎり何も送らないので、置いたら置きっぱなしで静止する。</p>
+     */
+    public static final class RingView {
+
+        /** 半径 1 ブロックあたりの印の数。少ないと多角形に見え、多いと重い。 */
+        private static final double MARKS_PER_BLOCK = 3.2;
+        private static final int MIN_MARKS = 16;
+        private static final int MAX_MARKS = 72;
+
+        private final Player owner;
+        private final Instance instance;
+        private final List<Entity> marks = new ArrayList<>();
+
+        private boolean visible;
+        private double centerX = Double.NaN;
+        private double centerZ = Double.NaN;
+        private double radius = -1;
+        private double y = Double.NaN;
+
+        public RingView(Player owner, Instance instance) {
+            this.owner = owner;
+            this.instance = instance;
+        }
+
+        public void show(double centerX, double centerZ, double radius, double y) {
+            if (visible && same(centerX, this.centerX) && same(centerZ, this.centerZ)
+                    && same(radius, this.radius) && same(y, this.y)) {
+                return;
+            }
+            this.centerX = centerX;
+            this.centerZ = centerZ;
+            this.radius = radius;
+            this.y = y;
+            visible = true;
+
+            int count = (int) Math.round(radius * MARKS_PER_BLOCK);
+            count = Math.max(MIN_MARKS, Math.min(MAX_MARKS, count));
+            ensureCapacity(count);
+
+            for (int i = 0; i < count; i++) {
+                double angle = 2 * Math.PI * i / count;
+                marks.get(i).teleport(new Pos(
+                        centerX + Math.cos(angle) * radius, y,
+                        centerZ + Math.sin(angle) * radius));
+            }
+            for (int i = count; i < marks.size(); i++) {
+                marks.get(i).removeViewer(owner);
+            }
+            for (int i = 0; i < count; i++) {
+                marks.get(i).addViewer(owner);
+            }
+        }
+
+        public void hide() {
+            if (!visible) {
+                return;
+            }
+            visible = false;
+            radius = -1;
+            for (Entity mark : marks) {
+                mark.removeViewer(owner);
+            }
+        }
+
+        public void dispose() {
+            for (Entity mark : marks) {
+                mark.remove();
+            }
+            marks.clear();
+            visible = false;
+        }
+
+        private static boolean same(double a, double b) {
+            return Math.abs(a - b) < 1e-6;
+        }
+
+        private void ensureCapacity(int size) {
+            while (marks.size() < size) {
+                Entity mark = new Entity(EntityType.BLOCK_DISPLAY);
+                mark.setNoGravity(true);
+                mark.setAutoViewable(false);
+                mark.setInstance(instance, new Pos(0, ArenaRenderer.SURFACE_Y, 0));
+                mark.editEntityMeta(BlockDisplayMeta.class, meta -> {
+                    meta.setBlockState(Palette.RANGE_MARK);
+                    meta.setTranslation(new Vec(-0.09, 0.0, -0.09));
+                    meta.setScale(new Vec(0.18, 0.18, 0.18));
+                    meta.setViewRange(1.5f);
+                    meta.setBrightness(15, 15);
+                });
+                marks.add(mark);
             }
         }
     }

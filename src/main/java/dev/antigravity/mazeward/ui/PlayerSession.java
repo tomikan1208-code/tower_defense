@@ -9,6 +9,7 @@ import dev.antigravity.mazeward.core.Vec2i;
 import dev.antigravity.mazeward.run.BlockCard;
 import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.stage.Stage;
+import dev.antigravity.mazeward.tower.Targeting;
 import dev.antigravity.mazeward.tower.TowerInstance;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
@@ -77,6 +78,15 @@ public final class PlayerSession {
     /** プレビューを描き直す間隔（tick）。パーティクル量を抑えるため毎 tick にはしない。 */
     private static final int DRAW_INTERVAL = 3;
 
+    /**
+     * 射程の輪を浮かべる高さ。
+     *
+     * <p>床すれすれに置くと、壁に重なった部分が中に埋まって消える。
+     * 輪が途切れると射程を読み違えるので、壁より上に出す。
+     * 俯瞰で見ているので、少し浮いていても位置は狂って見えない。</p>
+     */
+    private static final double RING_Y = ArenaRenderer.WALL_TOP_Y + 0.15;
+
     public enum Mode {
         NONE,
         CARD,
@@ -91,6 +101,7 @@ public final class PlayerSession {
      */
     private Battlefield field;
     private Overlay.GhostView ghost;
+    private Overlay.RingView ring;
     private Sidebar sidebar;
 
     private HandMode handMode = HandMode.OBSTACLE;
@@ -260,6 +271,7 @@ public final class PlayerSession {
         leaveStage();
         this.field = field;
         this.ghost = new Overlay.GhostView(player, field.instance());
+        this.ring = new Overlay.RingView(player, field.instance());
         clearSelection();
     }
 
@@ -268,6 +280,10 @@ public final class PlayerSession {
         if (ghost != null) {
             ghost.dispose();
             ghost = null;
+        }
+        if (ring != null) {
+            ring.dispose();
+            ring = null;
         }
         field = null;
         clearSelection();
@@ -282,6 +298,9 @@ public final class PlayerSession {
         cachedPreview = null;
         if (ghost != null) {
             ghost.hide();
+        }
+        if (ring != null) {
+            ring.hide();
         }
     }
 
@@ -396,13 +415,14 @@ public final class PlayerSession {
         // 検査の棒を持っている間は、置くほうのプレビューより優先する
         if (player.getHeldSlot() == SLOT_INSPECT) {
             cursor = null;
-            tickInspect(draw);
+            tickInspect();
             return;
         }
         clearInspect();
 
         if (!field.buildingAllowed() || mode == Mode.NONE) {
             ghost.hide();
+            ring.hide();
             cursor = null;
             return;
         }
@@ -410,6 +430,7 @@ public final class PlayerSession {
         cursor = aimCell();
         if (cursor == null || !field.grid().inBounds(cursor)) {
             ghost.hide();
+            ring.hide();
             return;
         }
 
@@ -428,7 +449,7 @@ public final class PlayerSession {
      * 光らせる・足元を囲う・射程を出す・数字を頭上に出す、の 4 つを同時に出して、
      * 開かずに決められるところまで見せる。</p>
      */
-    private void tickInspect(boolean draw) {
+    private void tickInspect() {
         Vec2i cell = inspectCell();
         TowerInstance tower = cell != null && field.grid().inBounds(cell)
                 ? field.towerAt(cell) : null;
@@ -442,19 +463,15 @@ public final class PlayerSession {
         }
         if (tower == null) {
             ghost.hide();
+            ring.hide();
             return;
         }
 
         double cx = field.arena().worldX(tower.centerX());
         double cz = field.arena().worldZ(tower.centerZ());
-        // 板は薄くする。囲うだけでよく、塔そのものを隠してしまっては本末転倒
-        ghost.show(field.toWorldPath(tower.footprint()), Palette.INSPECT_MARK,
-                ArenaRenderer.TOWER_STAND_Y, 0.12,
-                inspectLabel(tower), cx, cz, ArenaRenderer.TOWER_STAND_Y + 3.2);
-
-        if (draw) {
-            Overlay.drawRangeRing(List.of(player), cx, cz, field.resolvedStats(tower).range());
-        }
+        // 本体が光っているので、足元を板で囲う必要はない。文字と輪だけにする
+        ghost.showLabel(inspectLabel(tower), cx, ArenaRenderer.TOWER_STAND_Y + 3.2, cz);
+        ring.show(cx, cz, field.resolvedStats(tower).range(), RING_Y);
     }
 
     /** 検査中の強調を消す。持ち替え・ステージ退出のたびに通る。 */
@@ -466,6 +483,7 @@ public final class PlayerSession {
         inspected = null;
         inspectedBodies = List.of();
         ghost.hide();
+        ring.hide();
     }
 
     /** 頭上に出す性能。開かなくても強化するかどうかを決められる量にする。 */
@@ -479,6 +497,10 @@ public final class PlayerSession {
         text = text.append(Component.newline()).append(Component.text(
                 String.format("射程 %.1f  間隔 %dt", stats.range(), stats.cooldown()),
                 NamedTextColor.WHITE));
+        if (tower.kind().targeting() != Targeting.NONE) {
+            text = text.append(Component.newline()).append(Component.text(
+                    "狙い: " + tower.kind().targeting().displayName(), NamedTextColor.AQUA));
+        }
         if (stats.damage() > 0) {
             text = text.append(Component.newline()).append(Component.text(
                     String.format("攻撃力 %.1f  DPS %.0f", stats.damage(), stats.dps()),
@@ -548,6 +570,7 @@ public final class PlayerSession {
         ghost.show(field.toWorldPath(cells), block, ArenaRenderer.SURFACE_Y, 1.0,
                 label, field.arena().centerX(cursor), field.arena().centerZ(cursor),
                 ArenaRenderer.SURFACE_Y + 2.6);
+        ring.hide();
 
         if (draw && ok) {
             drawChangedPathSections(preview);
@@ -597,16 +620,14 @@ public final class PlayerSession {
                 label, field.arena().centerX(cursor), field.arena().centerZ(cursor),
                 ArenaRenderer.WALL_TOP_Y + 2.0);
 
-        if (draw) {
-            double range = towerKind.statsAt(0).range() + field.modifiers().rangeBonus();
-            double cx = 0;
-            double cz = 0;
-            for (Vec2i cell : cells) {
-                cx += field.arena().centerX(cell);
-                cz += field.arena().centerZ(cell);
-            }
-            Overlay.drawRangeRing(List.of(player), cx / cells.size(), cz / cells.size(), range);
+        double range = towerKind.statsAt(0).range() + field.modifiers().rangeBonus();
+        double cx = 0;
+        double cz = 0;
+        for (Vec2i cell : cells) {
+            cx += field.arena().centerX(cell);
+            cz += field.arena().centerZ(cell);
         }
+        ring.show(cx / cells.size(), cz / cells.size(), range, RING_Y);
     }
 
     // ---------------------------------------------------------------- 確定操作

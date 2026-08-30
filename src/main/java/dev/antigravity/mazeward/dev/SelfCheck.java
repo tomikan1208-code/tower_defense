@@ -17,7 +17,9 @@ import dev.antigravity.mazeward.run.Roadmap;
 import dev.antigravity.mazeward.run.RunState;
 import dev.antigravity.mazeward.stage.StageGenerator;
 import dev.antigravity.mazeward.stage.Waves;
+import dev.antigravity.mazeward.tower.AttackStyle;
 import dev.antigravity.mazeward.tower.Look;
+import dev.antigravity.mazeward.tower.Targeting;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.Palette;
 import java.util.ArrayList;
@@ -47,6 +49,7 @@ public final class SelfCheck {
         checkBlockingRule();
         checkTowerSpecs();
         checkTowerModels();
+        checkTargeting();
         checkAbilities();
         checkCardMaterials();
         checkRoadmapGraph();
@@ -407,6 +410,39 @@ public final class SelfCheck {
         }
     }
 
+    /**
+     * 狙い方が塔ごとに散っているかを見る。
+     *
+     * <p>全部が「コアに近い敵」だと、種類を変えて並べても弾は同じ 1 体に集まる。
+     * 撃つ塔が同じ狙い方に偏っていないことだけ確かめる。</p>
+     */
+    private static void checkTargeting() {
+        section("狙い方");
+
+        java.util.Map<Targeting, Integer> used = new java.util.EnumMap<>(Targeting.class);
+        for (TowerKind kind : TowerKind.values()) {
+            Targeting mode = kind.targeting();
+            assertTrue(kind.passive() || kind.style() == AttackStyle.AURA
+                            || kind.style() == AttackStyle.CURSE || mode != Targeting.NONE,
+                    kind + " は敵を狙う塔なのに狙い方が決まっていない");
+            used.merge(mode, 1, Integer::sum);
+            System.out.printf("  %-4s %-8s %s%n", kind.displayName(),
+                    mode.displayName(), mode.description());
+        }
+        int attackers = 0;
+        for (TowerKind kind : TowerKind.values()) {
+            if (kind.targeting() != Targeting.NONE) {
+                attackers++;
+            }
+        }
+        for (Targeting mode : Targeting.values()) {
+            if (mode != Targeting.NONE) {
+                assertTrue(used.getOrDefault(mode, 0) < attackers,
+                        "撃つ塔が全部 " + mode + " を使っていて、狙い方が分かれていない");
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- タワーの見た目
 
     /**
@@ -454,7 +490,8 @@ public final class SelfCheck {
     /** 大きさを除いた見た目。別の塔どうしはここが違っていなければ見分けられない。 */
     private static String silhouette(TowerKind kind, Look look) {
         return kind.model().type().name() + "|" + look.profession() + "|" + look.helmet()
-                + "|" + look.chestplate() + "|" + look.hand() + "|" + look.tiers();
+                + "|" + look.chestplate() + "|" + look.hand() + "|" + look.tiers()
+                + "|" + look.spread();
     }
 
     /** 見た目を 1 行にまとめる。読んで違いが分かることがこのチェックの目的。 */
@@ -478,6 +515,9 @@ public final class SelfCheck {
         }
         if (look.tiers() > 1) {
             out.append(' ').append(look.tiers()).append("段");
+        }
+        if (look.spread()) {
+            out.append(" マスごと");
         }
         return out.toString();
     }
