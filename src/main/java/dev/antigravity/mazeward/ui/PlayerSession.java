@@ -9,15 +9,18 @@ import dev.antigravity.mazeward.core.Vec2i;
 import dev.antigravity.mazeward.run.BlockCard;
 import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.stage.Stage;
+import dev.antigravity.mazeward.tower.TowerInstance;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
 import dev.antigravity.mazeward.world.Overlay;
 import dev.antigravity.mazeward.world.Palette;
+import dev.antigravity.mazeward.world.TowerModel;
 import java.util.List;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.coordinate.Vec;
+import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
 import net.minestom.server.instance.block.Block;
 import net.minestom.server.inventory.Inventory;
@@ -42,11 +45,23 @@ public final class PlayerSession {
     public static final int PALETTE_SLOTS = 6;
 
     /**
+     * タワーの <b>2 ページ目以降だけ</b>、1 スロット目が「1 つ戻る」ボタンになる。
+     *
+     * <p>切り替えスロットは先へ送ることしかできない。戻りたいだけなのに一巡させるのは
+     * 操作として長すぎるので、戻る側を別に用意した。
+     * ただし置くのは <b>戻り先がある 2 ページ目以降だけ</b>。
+     * 1 ページ目に「戻る」を出しても行き先は障害物しかなく、
+     * それは 7 番を押し続ければ辿り着ける。
+     * 枠を 1 つ潰してまで二重に用意する意味がない。</p>
+     */
+    public static final int SLOT_PAGE_BACK = 0;
+
+    /**
      * 障害物 ⇄ タワーの切り替え。
      *
-     * <p>タワーが 6 種を超えたのでページ送りも兼ねる。押すたびに
+     * <p>タワーが 1 ページに収まらないのでページ送りも兼ねる。押すたびに
      * 障害物 → タワー前半 → タワー後半 → 障害物 … と一巡する。
-     * 別のキーを増やすより、<b>押すところが 1 つ</b> のほうが覚えることが少ない。</p>
+     * 戻るほうは 1 スロット目（{@link #SLOT_PAGE_BACK}）が受け持つ。</p>
      */
     public static final int SLOT_TOGGLE = 6;
 
@@ -85,6 +100,17 @@ public final class PlayerSession {
     private TowerKind towerKind;
     private Rot rot = Rot.R0;
     private Vec2i cursor;
+
+    /** 検査の棒でいま狙っているタワー。光らせている相手を覚えておかないと消せない。 */
+    private TowerInstance inspected;
+
+    /**
+     * 光らせている本体そのもの。
+     *
+     * <p>強化すると本体は作り直されるので、塔が同じでも中身は入れ替わる。
+     * 塔だけを見ていると、強化した瞬間に光が消えたまま戻らない。</p>
+     */
+    private List<Entity> inspectedBodies = List.of();
 
     private Inventory openMenu;
     private MenuHandler menuHandler;
@@ -142,15 +168,35 @@ public final class PlayerSession {
             return List.of();
         }
         List<TowerKind> towers = field.availableTowers();
-        int from = Math.min(towers.size(), towerPage * PALETTE_SLOTS);
-        int to = Math.min(towers.size(), from + PALETTE_SLOTS);
+        int from = Math.min(towers.size(), pageStart(towerPage));
+        int to = Math.min(towers.size(), from + towerSlotCount());
         return towers.subList(from, to);
+    }
+
+    /** そのページの先頭が、タワー一覧の何番目か。1 ページ目だけ 1 枠多い。 */
+    private static int pageStart(int page) {
+        return page <= 0 ? 0 : PALETTE_SLOTS + (page - 1) * (PALETTE_SLOTS - 1);
+    }
+
+    /** いまのページに並ぶタワーの数。2 ページ目以降は「戻る」に 1 枠取られる。 */
+    public int towerSlotCount() {
+        return towerPage == 0 ? PALETTE_SLOTS : PALETTE_SLOTS - 1;
     }
 
     /** タワーがあと 1 ページぶん残っているか。切り替えアイテムの表示に使う。 */
     public boolean hasNextTowerPage() {
         return field != null && handMode == HandMode.TOWER
-                && (towerPage + 1) * PALETTE_SLOTS < field.availableTowers().size();
+                && pageStart(towerPage) + towerSlotCount() < field.availableTowers().size();
+    }
+
+    /** そのスロットが「1 つ戻る」ボタンか。タワーの 2 ページ目以降だけ。 */
+    public boolean isPageBackSlot(int slot) {
+        return handMode == HandMode.TOWER && towerPage > 0 && slot == SLOT_PAGE_BACK;
+    }
+
+    /** タワーが並び始めるスロット。持ち替えた直後にもここを選ばせる。 */
+    public int firstPaletteSlot() {
+        return handMode == HandMode.TOWER && towerPage > 0 ? SLOT_PAGE_BACK + 1 : 0;
     }
 
     /**
@@ -167,6 +213,20 @@ public final class PlayerSession {
             handMode = HandMode.OBSTACLE;
             towerPage = 0;
         }
+        clearSelection();
+    }
+
+    /**
+     * 1 つ戻る。タワーの 1 ページ目からは障害物へ戻る。
+     *
+     * <p>{@link #toggleHandMode()} をちょうど逆に辿るので、
+     * 行き過ぎても同じ場所へ戻ってこられる。</p>
+     */
+    public void previousHandPage() {
+        if (handMode != HandMode.TOWER || towerPage <= 0) {
+            return;
+        }
+        towerPage--;
         clearSelection();
     }
 
@@ -204,6 +264,7 @@ public final class PlayerSession {
     }
 
     public void leaveStage() {
+        clearInspect();
         if (ghost != null) {
             ghost.dispose();
             ghost = null;
@@ -330,6 +391,16 @@ public final class PlayerSession {
         if (field == null || ghost == null) {
             return;
         }
+        boolean draw = globalTick % DRAW_INTERVAL == 0;
+
+        // 検査の棒を持っている間は、置くほうのプレビューより優先する
+        if (player.getHeldSlot() == SLOT_INSPECT) {
+            cursor = null;
+            tickInspect(draw);
+            return;
+        }
+        clearInspect();
+
         if (!field.buildingAllowed() || mode == Mode.NONE) {
             ghost.hide();
             cursor = null;
@@ -342,12 +413,111 @@ public final class PlayerSession {
             return;
         }
 
-        boolean draw = globalTick % DRAW_INTERVAL == 0;
         if (mode == Mode.CARD) {
             tickCardPreview(draw);
         } else {
             tickTowerPreview(draw);
         }
+    }
+
+    /**
+     * 検査中のタワーを名指しする。
+     *
+     * <p>右クリックで開く画面には「どの塔を開いたのか」が書かれているが、
+     * <b>開く前に</b>分かっていないと、狙いがずれたまま別の塔を売ってしまう。
+     * 光らせる・足元を囲う・射程を出す・数字を頭上に出す、の 4 つを同時に出して、
+     * 開かずに決められるところまで見せる。</p>
+     */
+    private void tickInspect(boolean draw) {
+        Vec2i cell = inspectCell();
+        TowerInstance tower = cell != null && field.grid().inBounds(cell)
+                ? field.towerAt(cell) : null;
+
+        List<Entity> bodies = tower == null ? List.of() : tower.bodies();
+        if (tower != inspected || bodies != inspectedBodies) {
+            TowerModel.setGlowing(inspectedBodies, false);
+            inspected = tower;
+            inspectedBodies = bodies;
+            TowerModel.setGlowing(inspectedBodies, true);
+        }
+        if (tower == null) {
+            ghost.hide();
+            return;
+        }
+
+        double cx = field.arena().worldX(tower.centerX());
+        double cz = field.arena().worldZ(tower.centerZ());
+        // 板は薄くする。囲うだけでよく、塔そのものを隠してしまっては本末転倒
+        ghost.show(field.toWorldPath(tower.footprint()), Palette.INSPECT_MARK,
+                ArenaRenderer.TOWER_STAND_Y, 0.12,
+                inspectLabel(tower), cx, cz, ArenaRenderer.TOWER_STAND_Y + 3.2);
+
+        if (draw) {
+            Overlay.drawRangeRing(List.of(player), cx, cz, field.resolvedStats(tower).range());
+        }
+    }
+
+    /** 検査中の強調を消す。持ち替え・ステージ退出のたびに通る。 */
+    private void clearInspect() {
+        if (inspected == null) {
+            return;
+        }
+        TowerModel.setGlowing(inspectedBodies, false);
+        inspected = null;
+        inspectedBodies = List.of();
+        ghost.hide();
+    }
+
+    /** 頭上に出す性能。開かなくても強化するかどうかを決められる量にする。 */
+    private Component inspectLabel(TowerInstance tower) {
+        TowerKind.Stats stats = field.resolvedStats(tower);
+        String name = tower.spec() == null ? tower.kind().displayName()
+                : tower.kind().displayName() + "・" + tower.spec().displayName();
+
+        Component text = Component.text(name + " Lv" + (tower.level() + 1),
+                tower.kind().element().color());
+        text = text.append(Component.newline()).append(Component.text(
+                String.format("射程 %.1f  間隔 %dt", stats.range(), stats.cooldown()),
+                NamedTextColor.WHITE));
+        if (stats.damage() > 0) {
+            text = text.append(Component.newline()).append(Component.text(
+                    String.format("攻撃力 %.1f  DPS %.0f", stats.damage(), stats.dps()),
+                    NamedTextColor.WHITE));
+        }
+        if (stats.slowFactor() > 0) {
+            text = text.append(Component.newline()).append(Component.text(
+                    String.format("減速 %.0f%%", stats.slowFactor() * 100), NamedTextColor.AQUA));
+        }
+        if (stats.burnDps() > 0) {
+            text = text.append(Component.newline()).append(Component.text(
+                    String.format("燃焼 %.1f/秒", stats.burnDps()), NamedTextColor.GOLD));
+        }
+        if (tower.boosted()) {
+            text = text.append(Component.newline()).append(Component.text(
+                    String.format("監視塔の支援 +%.0f%% / +%.0f%%",
+                            tower.boostDamage() * 100, tower.boostRate() * 100),
+                    NamedTextColor.AQUA));
+        }
+        if (tower.disabled()) {
+            text = text.append(Component.newline())
+                    .append(Component.text("妨害されて停止中", NamedTextColor.RED));
+        }
+
+        if (tower.maxed()) {
+            text = text.append(Component.newline())
+                    .append(Component.text("最大レベル", NamedTextColor.GRAY));
+        } else {
+            int cost = (int) Math.round(tower.nextUpgradeCost()
+                    * field.modifiers().upgradeCostMultiplier());
+            boolean affordable = field.wallet().balance() >= cost;
+            String next = tower.nextIsSpecialization()
+                    ? "特化を選ぶ " + field.money(cost)
+                    : "強化 → Lv" + (tower.level() + 2) + "  " + field.money(cost);
+            text = text.append(Component.newline()).append(Component.text(next,
+                    affordable ? NamedTextColor.GREEN : NamedTextColor.RED));
+        }
+        return text.append(Component.newline())
+                .append(Component.text("右クリックで強化 / 売却", NamedTextColor.DARK_GRAY));
     }
 
     private void tickCardPreview(boolean draw) {
@@ -453,7 +623,7 @@ public final class PlayerSession {
             return Battlefield.Outcome.fail("ステージにいません");
         }
         if (mode == Mode.NONE) {
-            return Battlefield.Outcome.fail("ホットバー 1〜5 でカードを選ぶか、7 番のタワー一覧から選んでください");
+            return Battlefield.Outcome.fail("ホットバー 1〜6 でカードを選ぶか、7 番でタワーに持ち替えてください");
         }
 
         Vec2i target = aimCell();
@@ -510,10 +680,12 @@ public final class PlayerSession {
         }
 
         if (handMode == HandMode.TOWER) {
+            // 2 ページ目以降の 1 スロット目は「戻る」なので、選択としては空になる
+            int index = slot - firstPaletteSlot();
             List<TowerKind> towers = palette();
-            if (slot < towers.size()) {
-                if (mode != Mode.TOWER || towerKind != towers.get(slot)) {
-                    selectTower(towers.get(slot));
+            if (index >= 0 && index < towers.size()) {
+                if (mode != Mode.TOWER || towerKind != towers.get(index)) {
+                    selectTower(towers.get(index));
                 }
             } else {
                 clearSelection();

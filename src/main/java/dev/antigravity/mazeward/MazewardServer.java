@@ -10,6 +10,7 @@ import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
 import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockInteractEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
+import net.minestom.server.event.player.PlayerEntityInteractEvent;
 import net.minestom.server.event.player.PlayerChangeHeldSlotEvent;
 import net.minestom.server.event.player.PlayerChatEvent;
 import net.minestom.server.event.player.PlayerDisconnectEvent;
@@ -58,6 +59,7 @@ public final class MazewardServer {
         events.addListener(PlayerHandAnimationEvent.class, game::onHandAnimation);
         events.addListener(PlayerUseItemEvent.class, game::onUseItem);
         events.addListener(PlayerBlockInteractEvent.class, game::onBlockInteract);
+        events.addListener(PlayerEntityInteractEvent.class, game::onEntityInteract);
         events.addListener(PlayerBlockPlaceEvent.class, game::onBlockPlace);
         events.addListener(PlayerBlockBreakEvent.class, game::onBlockBreak);
         events.addListener(PlayerChangeHeldSlotEvent.class, game::onChangeHeldSlot);

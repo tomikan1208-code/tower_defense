@@ -14,8 +14,9 @@ import net.minestom.server.instance.block.Block;
  * ここより下（Minestom）は「ブロック座標」しか知らない。</p>
  *
  * <pre>
+ *   y = 67    タワー本体（エンティティ）の足元（TOWER_STAND_Y）
  *   y = 67.5  飛行敵
- *   y = 66    タワーの模型が乗る面（WALL_TOP_Y）
+ *   y = 66    タワーの台座ブロック（WALL_TOP_Y）
  *   y = 65    壁ブロック / 地上敵の足元（SURFACE_Y）
  *   y = 64    床ブロック（FLOOR_Y）
  * </pre>
@@ -29,6 +30,8 @@ public final class ArenaRenderer {
     public static final int SURFACE_Y = FLOOR_Y + 1;
     public static final int WALL_HEIGHT = 1;
     public static final int WALL_TOP_Y = SURFACE_Y + WALL_HEIGHT;
+    /** 台座の天面。タワーのエンティティはここに立つ。 */
+    public static final int TOWER_STAND_Y = WALL_TOP_Y + 1;
     public static final int BORDER_HEIGHT = 2;
     public static final double FLYING_Y = SURFACE_Y + 2.5;
 
@@ -192,14 +195,21 @@ public final class ArenaRenderer {
         }
     }
 
-    /** タワーの模型ブロックを壁の上に置く。 */
-    public void paintTower(Iterable<Vec2i> footprint, Block model) {
+    /**
+     * タワーの台座を壁の上に敷く。
+     *
+     * <p>本体はエンティティなので 1 点にしか立たない。占有マスが n×m あることは
+     * <b>台座の広がりでしか見えない</b>ので、footprint のセルを 1 つ残らず塗る。
+     * これがないと「2x2 の塔を置いたのに 1 マスぶんしか使っていないように見える」ことになり、
+     * 隣にもう 1 基置けると勘違いする。</p>
+     */
+    public void paintPedestal(Iterable<Vec2i> footprint, Block pedestal) {
         for (Vec2i cell : footprint) {
-            instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), model);
+            instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), pedestal);
         }
     }
 
-    public void clearTower(Iterable<Vec2i> footprint) {
+    public void clearPedestal(Iterable<Vec2i> footprint) {
         for (Vec2i cell : footprint) {
             instance.setBlock(originX + cell.x(), WALL_TOP_Y, originZ + cell.z(), Block.AIR);
         }

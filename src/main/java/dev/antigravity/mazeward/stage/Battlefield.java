@@ -22,6 +22,7 @@ import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.ArenaRenderer;
 import dev.antigravity.mazeward.world.Overlay;
 import dev.antigravity.mazeward.world.Palette;
+import dev.antigravity.mazeward.world.TowerModel;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -36,6 +37,7 @@ import net.minestom.server.color.Color;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
+import net.minestom.server.entity.metadata.other.SlimeMeta;
 import net.minestom.server.instance.Instance;
 import net.minestom.server.instance.block.Block;
 import net.minestom.server.particle.Particle;
@@ -516,13 +518,23 @@ public abstract class Battlefield {
             return null;
         }
 
-        Entity body = new Entity(kind.entityType());
-        body.setNoGravity(true);
+        Entity body = createBody(kind);
         body.setInstance(instance, waypoints.get(0));
 
         EnemyInstance enemy = new EnemyInstance(kind, body, waypoints, hp, reward);
         enemies.add(enemy);
         return enemy;
+    }
+
+    /** 敵の見た目を持つエンティティを作る。スライム系はここで大きさを決める。 */
+    private static Entity createBody(EnemyKind kind) {
+        Entity body = new Entity(kind.entityType());
+        int slimeSize = kind.slimeSize();
+        if (slimeSize > 0) {
+            body.editEntityMeta(SlimeMeta.class, meta -> meta.setSize(slimeSize));
+        }
+        body.setNoGravity(true);
+        return body;
     }
 
     private List<Pos> waypointsFor(EnemyKind kind, int spawnIndex) {
@@ -585,12 +597,11 @@ public abstract class Battlefield {
         double hp = parent.maxHp() * 0.28;
         int reward = Math.max(1, parent.goldReward() / 3);
         for (int i = 0; i < trait.splitCount(); i++) {
-            Entity body = new Entity(EnemyKind.GRUNT.entityType());
-            body.setNoGravity(true);
+            Entity body = createBody(EnemyKind.SPLITLING);
             body.setInstance(instance, at);
 
             EnemyInstance child = new EnemyInstance(
-                    EnemyKind.GRUNT, body, parent.waypoints(), hp, reward);
+                    EnemyKind.SPLITLING, body, parent.waypoints(), hp, reward);
             // 少しずらして出すと重なって 1 体に見えるのを防げる
             child.advanceTo(Math.max(0.0, parent.travelled() - 0.9 * i));
             enemies.add(child);
@@ -760,7 +771,9 @@ public abstract class Battlefield {
         tower.resetCooldown(stats.cooldown());
         playFireSound(tower);
 
-        Pos muzzle = new Pos(towerWorldX(tower), ArenaRenderer.WALL_TOP_Y + 0.6, towerWorldZ(tower));
+        TowerModel.aimAt(tower.bodies(), target.position().x(), target.position().z());
+        Pos muzzle = new Pos(towerWorldX(tower),
+                ArenaRenderer.TOWER_STAND_Y + 1.1, towerWorldZ(tower));
         Color tracerColor = new Color(
                 tower.kind().element().color().red(),
                 tower.kind().element().color().green(),
@@ -1177,7 +1190,8 @@ public abstract class Battlefield {
         for (Vec2i cell : tower.footprint()) {
             towerByCell.put(cell, tower);
         }
-        arena.paintTower(tower.footprint(), kind.model());
+        arena.paintPedestal(tower.footprint(), kind.pedestal());
+        attachTowerBody(tower);
         attachTowerLabel(tower);
         recomputeSupport();
         playSound(SoundEvent.BLOCK_ANVIL_USE, 0.7f, 1.2f);
@@ -1209,6 +1223,12 @@ public abstract class Battlefield {
             return Outcome.fail(currencyName() + "が足りません（" + money(cost) + " 必要）");
         }
         tower.upgrade(cost, spec);
+        attachTowerBody(tower);
+        if (spec != null) {
+            Overlay.drawBurst(players,
+                    new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y + 1.0, towerWorldZ(tower)),
+                    Particle.TOTEM_OF_UNDYING, 30, 0.5f);
+        }
         updateTowerLabel(tower);
         recomputeSupport();
         playSound(SoundEvent.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.8f);
@@ -1227,7 +1247,8 @@ public abstract class Battlefield {
         for (Vec2i footprintCell : tower.footprint()) {
             towerByCell.remove(footprintCell);
         }
-        arena.clearTower(tower.footprint());
+        arena.clearPedestal(tower.footprint());
+        removeTowerBodies(tower);
         if (tower.label() != null) {
             tower.label().remove();
             ownedEntities.remove(tower.label());
@@ -1283,9 +1304,32 @@ public abstract class Battlefield {
         ownedEntities.add(label);
     }
 
+    /**
+     * 台座の上に本体を立たせる。強化のたびに立て直す。
+     *
+     * <p>大きさも段数も装備も変わりうるので、差分を当てるより <b>作り直すほうが確実</b>。
+     * 1 基あたり数回しか通らないので、作り直しの重さは問題にならない。</p>
+     */
+    private void attachTowerBody(TowerInstance tower) {
+        removeTowerBodies(tower);
+        List<Entity> bodies = TowerModel.spawn(instance, tower.kind(), tower.look(),
+                new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y, towerWorldZ(tower)),
+                tower.footprint().size(), tower.level());
+        tower.setBodies(bodies);
+        ownedEntities.addAll(bodies);
+    }
+
+    private void removeTowerBodies(TowerInstance tower) {
+        for (Entity body : tower.bodies()) {
+            body.remove();
+            ownedEntities.remove(body);
+        }
+        tower.setBodies(List.of());
+    }
+
     private void attachTowerLabel(TowerInstance tower) {
         Entity label = Overlay.createLabel(instance,
-                new Pos(towerWorldX(tower), ArenaRenderer.WALL_TOP_Y + 1.4, towerWorldZ(tower)),
+                new Pos(towerWorldX(tower), ArenaRenderer.TOWER_STAND_Y + 2.2, towerWorldZ(tower)),
                 towerLabelText(tower), 0.45f);
         tower.setLabel(label);
         ownedEntities.add(label);

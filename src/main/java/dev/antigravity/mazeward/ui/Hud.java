@@ -123,12 +123,17 @@ public final class Hud {
 
         if (session.handMode() == PlayerSession.HandMode.TOWER) {
             List<TowerKind> towers = session.palette();
-            for (int slot = 0; slot < PlayerSession.PALETTE_SLOTS; slot++) {
-                if (slot >= towers.size()) {
+            int first = session.firstPaletteSlot();
+            if (first > PlayerSession.SLOT_PAGE_BACK) {
+                inventory.setItemStack(PlayerSession.SLOT_PAGE_BACK, pageBackItem(session));
+            }
+            for (int slot = first; slot < PlayerSession.PALETTE_SLOTS; slot++) {
+                int index = slot - first;
+                if (index >= towers.size()) {
                     inventory.setItemStack(slot, ItemStack.AIR);
                     continue;
                 }
-                TowerKind kind = towers.get(slot);
+                TowerKind kind = towers.get(index);
                 boolean selected = session.mode() == PlayerSession.Mode.TOWER
                         && session.selectedTower() == kind;
                 inventory.setItemStack(slot, towerPaletteItem(kind, selected,
@@ -153,6 +158,20 @@ public final class Hud {
         inventory.setItemStack(PlayerSession.SLOT_TOGGLE, toggleItem(session));
     }
 
+    /**
+     * タワーの 2 ページ目以降の 1 スロット目。前のページへ戻る。
+     *
+     * <p>行き先をそのまま名前に出す。「戻る」だけだと押すまで行き先が分からない。</p>
+     */
+    private static ItemStack pageBackItem(PlayerSession session) {
+        return item(Material.PAPER,
+                Component.text("◀ タワー " + session.towerPage() + "ページ目に戻る",
+                        NamedTextColor.AQUA),
+                Component.text("いま持っているのはタワー（"
+                        + (session.towerPage() + 1) + "ページ目）", NamedTextColor.GRAY),
+                Component.text("右クリックで前のページ  2〜6 でタワー選択", NamedTextColor.DARK_GRAY));
+    }
+
     private static ItemStack toggleItem(PlayerSession session) {
         boolean tower = session.handMode() == PlayerSession.HandMode.TOWER;
         boolean more = session.hasNextTowerPage();
@@ -167,7 +186,21 @@ public final class Hud {
         return item(!tower ? Material.BOW : more ? Material.PAPER : Material.BRICKS,
                 Component.text(next, tower && !more ? NamedTextColor.YELLOW : NamedTextColor.AQUA),
                 Component.text(now, NamedTextColor.GRAY),
-                Component.text("右クリックで切り替え  1〜6 で選択", NamedTextColor.DARK_GRAY));
+                Component.text(tower && session.towerPage() > 0
+                        ? "右クリックで次へ  1 番で前のページ"
+                        : "右クリックで切り替え  1〜6 で選択", NamedTextColor.DARK_GRAY));
+    }
+
+    /**
+     * 強化 / 売却の検査棒。
+     *
+     * <p>持っている間は狙ったタワーが光り、足元が囲われ、射程と性能が頭上に出る。
+     * 望遠鏡は右クリックで画面がズームしてしまうので使えない。</p>
+     */
+    public static ItemStack inspectItem() {
+        return item(Material.END_ROD, Component.text("強化 / 売却", NamedTextColor.WHITE),
+                Component.text("持つと、狙ったタワーが光って性能が出る", NamedTextColor.GRAY),
+                Component.text("右クリックで強化・売却の画面", NamedTextColor.DARK_GRAY));
     }
 
     public static void applyStageHotbar(PlayerSession session) {
@@ -178,10 +211,7 @@ public final class Hud {
         }
         applyPalette(session);
 
-        // 望遠鏡は右クリックで画面がズームしてしまうため、使用アクションのないアイテムを使う
-        player.getInventory().setItemStack(PlayerSession.SLOT_INSPECT,
-                item(Material.BLAZE_ROD, Component.text("強化 / 売却", NamedTextColor.WHITE),
-                        Component.text("タワーを狙って右クリック", NamedTextColor.DARK_GRAY)));
+        player.getInventory().setItemStack(PlayerSession.SLOT_INSPECT, inspectItem());
 
         boolean build = stage.phase() == Phase.BUILD;
         player.getInventory().setItemStack(PlayerSession.SLOT_START, build

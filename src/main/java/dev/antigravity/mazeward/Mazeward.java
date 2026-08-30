@@ -44,6 +44,7 @@ import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
 import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockInteractEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
+import net.minestom.server.event.player.PlayerEntityInteractEvent;
 import net.minestom.server.event.player.PlayerChangeHeldSlotEvent;
 import net.minestom.server.event.player.PlayerHandAnimationEvent;
 import net.minestom.server.event.player.PlayerUseItemEvent;
@@ -242,6 +243,18 @@ public final class Mazeward implements Stage.Listener {
         primaryAction(event.getPlayer());
     }
 
+    /**
+     * 右クリック（エンティティ）。
+     *
+     * <p>タワー本体も敵もエンティティなので、狙った先にそれが挟まると
+     * クライアントはブロックではなくエンティティへの操作を送ってくる。
+     * 何も繋いでいないと「タワーの上を狙うと右クリックが効かない」ことになるので、
+     * <b>ブロックを叩いたときと同じ処理へ流す</b>。</p>
+     */
+    public void onEntityInteract(PlayerEntityInteractEvent event) {
+        primaryAction(event.getPlayer());
+    }
+
     public void onBlockPlace(PlayerBlockPlaceEvent event) {
         event.setCancelled(true);
     }
@@ -269,12 +282,23 @@ public final class Mazeward implements Stage.Listener {
      */
     private void toggleHand(PlayerSession session) {
         session.toggleHandMode();
-        session.player().setHeldItemSlot((byte) 0);
+        afterHandChange(session);
+    }
+
+    /** タワーのページを 1 つ戻す（1 ページ目なら障害物へ）。 */
+    private void previousHand(PlayerSession session) {
+        session.previousHandPage();
+        afterHandChange(session);
+    }
+
+    private void afterHandChange(PlayerSession session) {
+        session.player().setHeldItemSlot((byte) session.firstPaletteSlot());
         session.syncSelectionWithHotbar();
         refreshHotbar(session);
         boolean tower = session.handMode() == PlayerSession.HandMode.TOWER;
         session.player().sendActionBar(Component.text(
-                tower ? "タワーに持ち替えました" : "障害物カードに持ち替えました",
+                tower ? "タワーに持ち替えました（" + (session.towerPage() + 1) + "ページ目）"
+                        : "障害物カードに持ち替えました",
                 tower ? NamedTextColor.AQUA : NamedTextColor.YELLOW));
     }
 
@@ -348,6 +372,10 @@ public final class Mazeward implements Stage.Listener {
                 Hud.applyStageHotbar(session);
             }
             default -> {
+                if (session.isPageBackSlot(slot)) {
+                    previousHand(session);
+                    return;
+                }
                 boolean wasCard = session.mode() == PlayerSession.Mode.CARD;
                 Stage.Outcome outcome = session.confirm();
                 Hud.feedback(player, outcome);
@@ -520,6 +548,10 @@ public final class Mazeward implements Stage.Listener {
             }
             case VersusHud.SLOT_SEND -> VersusHud.openSendMenu(session, self, versus);
             default -> {
+                if (session.isPageBackSlot(player.getHeldSlot())) {
+                    previousHand(session);
+                    return;
+                }
                 var outcome = session.confirm();
                 Hud.feedback(player, outcome);
                 if (outcome.success()) {

@@ -25,6 +25,15 @@ public final class Palette {
     /** 緑: 配置可能なタワーのゴースト。 */
     public static final Block GHOST_TOWER = Block.LIME_STAINED_GLASS;
 
+    /**
+     * 水色: 検査中のタワーの足元に敷く板。
+     *
+     * <p>配置ゴースト（黄・緑・赤）とは別の色にする。
+     * 「いま置こうとしている」のと「いま見ている」のを取り違えると、
+     * 強化するつもりで別の塔を売ることになる。</p>
+     */
+    public static final Block INSPECT_MARK = Block.LIGHT_BLUE_STAINED_GLASS;
+
     public static final Color RANGE_RING = new Color(255, 214, 96);
     public static final Color SPAWN_MARK = new Color(255, 90, 90);
     public static final Color CORE_MARK = new Color(120, 220, 255);

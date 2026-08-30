@@ -32,9 +32,7 @@ public final class VersusHud {
 
         Hud.applyPalette(session);
 
-        player.getInventory().setItemStack(PlayerSession.SLOT_INSPECT,
-                Hud.item(Material.BLAZE_ROD, Component.text("強化 / 売却", NamedTextColor.WHITE),
-                        Component.text("タワーを狙って右クリック", NamedTextColor.DARK_GRAY)));
+        player.getInventory().setItemStack(PlayerSession.SLOT_INSPECT, Hud.inspectItem());
 
         player.getInventory().setItemStack(SLOT_SEND, match.preparing()
                 ? Hud.item(Material.CLOCK,

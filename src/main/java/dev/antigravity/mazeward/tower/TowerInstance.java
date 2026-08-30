@@ -19,6 +19,7 @@ public final class TowerInstance {
     private TowerKind.Spec spec;
     private int investedGold;
     private int cooldown;
+    private List<Entity> bodies = List.of();
     private Entity label;
 
     /** 妨害者に黙らされている残り tick。 */
@@ -84,6 +85,11 @@ public final class TowerInstance {
     /** 最終段階で選んだ特化。未選択なら null。 */
     public TowerKind.Spec spec() {
         return spec;
+    }
+
+    /** いまの見た目。特化を選ぶとここが変わる。 */
+    public Look look() {
+        return kind.lookFor(spec);
     }
 
     /** 次の強化が「特化を選ぶ」段階か。 */
@@ -154,6 +160,18 @@ public final class TowerInstance {
 
     public void resetCooldown(int ticks) {
         cooldown = ticks;
+    }
+
+    /**
+     * 台座の上に立っている本体。見た目だけで、判定には使わない。
+     * 「二段」の特化を選んだ塔は 2 体になる。
+     */
+    public List<Entity> bodies() {
+        return bodies;
+    }
+
+    public void setBodies(List<Entity> bodies) {
+        this.bodies = bodies;
     }
 
     public Entity label() {

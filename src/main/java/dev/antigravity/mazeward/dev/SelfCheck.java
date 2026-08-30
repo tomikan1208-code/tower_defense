@@ -17,6 +17,7 @@ import dev.antigravity.mazeward.run.Roadmap;
 import dev.antigravity.mazeward.run.RunState;
 import dev.antigravity.mazeward.stage.StageGenerator;
 import dev.antigravity.mazeward.stage.Waves;
+import dev.antigravity.mazeward.tower.Look;
 import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.Palette;
 import java.util.ArrayList;
@@ -45,6 +46,7 @@ public final class SelfCheck {
         checkPathDeterminism();
         checkBlockingRule();
         checkTowerSpecs();
+        checkTowerModels();
         checkAbilities();
         checkCardMaterials();
         checkRoadmapGraph();
@@ -403,6 +405,81 @@ public final class SelfCheck {
                     specs.get(0).displayName(), a.dps(),
                     specs.get(1).displayName(), b.dps());
         }
+    }
+
+    // ---------------------------------------------------------------- タワーの見た目
+
+    /**
+     * 塔が 9 種とも別のエンティティに見えることを確かめる。
+     *
+     * <p>見た目が被ると、俯瞰したときにどこに何を置いたかが読めなくなる。
+     * 台座のブロックも同じ理由で全種類ばらしておく。</p>
+     */
+    private static void checkTowerModels() {
+        section("タワーの見た目");
+
+        java.util.Set<TowerKind.Model> models = new java.util.HashSet<>();
+        java.util.Set<net.minestom.server.instance.block.Block> pedestals = new java.util.HashSet<>();
+        // 塔をまたいだ衝突も見る。大きさ違いは同じ塔の中でしか通じない見分け方なので、
+        // 別の塔どうしは「大きさ以外」で違っていなければならない
+        java.util.Map<String, TowerKind> silhouettes = new java.util.HashMap<>();
+        for (TowerKind kind : TowerKind.values()) {
+            assertTrue(models.add(kind.model()),
+                    kind + " の本体が他の塔と同じ見た目になっている");
+            assertTrue(pedestals.add(kind.pedestal()),
+                    kind + " の台座が他の塔と同じブロックになっている");
+
+            // 特化は性能だけでなく見た目も分かれていること。
+            // 見た目が同じだと、盤面を見ただけではどちらに振ったのか分からない
+            List<TowerKind.Spec> specs = kind.specs();
+            Look base = kind.lookFor(null);
+            Look a = kind.lookFor(specs.get(0));
+            Look b = kind.lookFor(specs.get(1));
+            assertTrue(!a.equals(b), kind + " の 2 つの特化が同じ見た目になっている");
+            assertTrue(!a.equals(base) && !b.equals(base),
+                    kind + " の特化で見た目が変わっていない");
+
+            for (Look look : List.of(base, a, b)) {
+                TowerKind other = silhouettes.putIfAbsent(silhouette(kind, look), kind);
+                assertTrue(other == null || other == kind,
+                        kind + " と " + other + " が同じ見た目になっている: " + silhouette(kind, look));
+            }
+
+            System.out.printf("  %-4s %-24s 台座 %-24s → %s / %s%n", kind.displayName(),
+                    describe(kind, base), kind.pedestal().name().replace("minecraft:", ""),
+                    describe(kind, a), describe(kind, b));
+        }
+    }
+
+    /** 大きさを除いた見た目。別の塔どうしはここが違っていなければ見分けられない。 */
+    private static String silhouette(TowerKind kind, Look look) {
+        return kind.model().type().name() + "|" + look.profession() + "|" + look.helmet()
+                + "|" + look.chestplate() + "|" + look.hand() + "|" + look.tiers();
+    }
+
+    /** 見た目を 1 行にまとめる。読んで違いが分かることがこのチェックの目的。 */
+    private static String describe(TowerKind kind, Look look) {
+        StringBuilder out = new StringBuilder(
+                kind.model().type().name().replace("minecraft:", ""));
+        if (look.profession() != null) {
+            out.append('(').append(look.profession().name().replace("minecraft:", "")).append(')');
+        }
+        if (look.helmet() != null) {
+            out.append(" 頭:").append(look.helmet().name().replace("minecraft:", ""));
+        }
+        if (look.chestplate() != null) {
+            out.append(" 胴:").append(look.chestplate().name().replace("minecraft:", ""));
+        }
+        if (look.hand() != null) {
+            out.append(" 手:").append(look.hand().name().replace("minecraft:", ""));
+        }
+        if (look.scale() != 1.0) {
+            out.append(String.format(" x%.2f", look.scale()));
+        }
+        if (look.tiers() > 1) {
+            out.append(' ').append(look.tiers()).append("段");
+        }
+        return out.toString();
     }
 
     // ---------------------------------------------------------------- カードの素材
