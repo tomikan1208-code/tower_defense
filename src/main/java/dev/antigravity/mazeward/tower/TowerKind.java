@@ -106,18 +106,27 @@ public enum TowerKind {
 
     // ---------------------------------------------------------------- 支援・妨害
 
+    /**
+     * 60 秒に 1 度だけ撃てる切り札。
+     *
+     * <p>数ブロック押し戻すだけだった頃は、こまめに撃てるぶん
+     * 「少しだけ足止めする塔」にしかならず、置いても盤面が変わらなかった。
+     * 出発点まで丸ごと戻す代わりに、撃てるのを 60 秒に 1 度に絞ってある。
+     * <b>いつ撃たせるかが読み合いになる</b>のがこの塔の面白さで、
+     * 長い迷路を組むほど 1 回の価値が跳ね上がる。</p>
+     */
     BANISHER(
-            "送還塔", "敵を来た道へ押し戻す。削る力は無いが、キルゾーンを何度も通させる。",
+            "送還塔", "60 秒に 1 度、敵を出発点へ送り返す。削る力は無いが、迷路をもう一周させる。",
             Shapes.DOT, Material.ENDER_PEARL, Block.PURPUR_SLAB, Model.of(EntityType.ENDERMAN),
             Element.VOID, AttackStyle.BANISH, Targeting.FIRST,
-            75, 5.5, 55, 5.0,
+            75, 5.5, 1200, 5.0,
             0.0, 0, 0.0, 0, 0.0, 0,
             SoundEvent.ENTITY_ENDERMAN_TELEPORT, 1.2f, EntityType.ENDER_PEARL,
-            Effect.banish(4.0),
-            new Spec("深淵送り", "押し戻す距離が 2 倍以上になる",
-                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.banish(5.0))
+            Effect.banish(1),
+            new Spec("一斉送還", "1 度に 3 体まとめて送り返す。間隔は変わらない",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.banish(2))
                     .looking(Look.of().helmet(Material.OBSIDIAN)),
-            new Spec("連続送還", "攻撃間隔が半分になる。押し戻す距離は変わらない",
+            new Spec("連続送還", "間隔が半分（30 秒）になる。送り返すのは 1 体のまま",
                     1.0, 0, 0.5, 0, 0, 0, 0)
                     .looking(Look.of().helmet(Material.CHORUS_FLOWER))),
 
@@ -413,8 +422,10 @@ public enum TowerKind {
         double burn = burnDps * levelMul;
         int burnFor = burnTicks;
         // 支援・妨害の効果もレベルで伸びる。伸びなければ強化する意味がない
+        // 送り返す数だけはレベルで増やさない。1 回の重さが変わらないほうが、
+        // 「いつ撃たせるか」の読み合いが素直に効く
         Effect resolved = effect.empty() ? effect : new Effect(
-                effect.knockback() * levelMul,
+                effect.banishTargets(),
                 effect.vulnerability() * levelMul,
                 effect.vulnerabilityTicks(),
                 effect.boostDamage() * levelMul,

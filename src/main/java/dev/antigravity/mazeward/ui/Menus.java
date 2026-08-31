@@ -185,8 +185,10 @@ public final class Menus {
     static List<Component> effectLore(TowerKind.Stats stats) {
         List<Component> lore = new ArrayList<>();
         Effect effect = stats.effect();
-        if (effect.knockback() > 0) {
-            lore.add(Component.text(String.format("送還 %.1f ブロック押し戻す", effect.knockback()),
+        if (effect.banishTargets() > 0) {
+            // 「何秒に 1 度か」まで出さないと、この塔の強さも弱さも伝わらない
+            lore.add(Component.text(String.format("送還 %.0f 体を出発点へ（%.0f 秒に 1 度）",
+                    effect.banishTargets(), stats.cooldown() / 20.0),
                     NamedTextColor.DARK_PURPLE));
         }
         if (effect.vulnerability() > 0) {
@@ -236,8 +238,8 @@ public final class Menus {
             public void render(PlayerSession s, Inventory inventory) {
                 TowerKind.Stats stats = field.resolvedStats(tower);
                 List<Component> lore = new ArrayList<>();
-                lore.add(Component.text(String.format("射程 %.1f  間隔 %dt",
-                        stats.range(), stats.cooldown()), NamedTextColor.WHITE));
+                lore.add(Component.text(String.format("射程 %.1f  間隔 %.1f秒",
+                        stats.range(), stats.cooldown() / 20.0), NamedTextColor.WHITE));
                 if (tower.kind().targeting() != dev.antigravity.mazeward.tower.Targeting.NONE) {
                     lore.add(Component.text("狙い: " + tower.kind().targeting().displayName()
                             + " — " + tower.kind().targeting().description(), NamedTextColor.AQUA));

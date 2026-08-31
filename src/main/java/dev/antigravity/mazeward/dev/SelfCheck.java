@@ -865,24 +865,68 @@ public final class SelfCheck {
                 "呪詛(" + String.format("%.2f", curse) + ") が庇護("
                         + String.format("%.2f", ward) + ") を上回っていない");
 
-        // 送還は「押し戻す」効果なので、敵が 1 秒で進む距離より大きくないと意味がない
-        double knockback = TowerKind.BANISHER.statsAt(0).effect().knockback();
-        double perSecond = EnemyKind.GRUNT.baseSpeed() * 20.0;
-        assertTrue(knockback > perSecond,
-                "送還の押し戻し(" + knockback + ") が徘徊者の 1 秒ぶん("
-                        + String.format("%.2f", perSecond) + ") 以下");
+        // 送還は「出発点まで戻す」代わりに滅多に撃てない切り札。
+        // こまめに撃てるようだと、ただの強い足止めになって読み合いが消える
+        int banishCooldown = TowerKind.BANISHER.statsAt(TowerKind.MAX_LEVEL).cooldown();
+        assertTrue(banishCooldown >= 20 * 20,
+                "送還の間隔(" + banishCooldown + "t) が短すぎて切り札になっていない");
+        assertTrue(TowerKind.BANISHER.statsAt(0).effect().banishTargets() >= 1,
+                "送還塔が誰も送り返さない");
 
         // 監視塔は自分では撃たない
         assertTrue(TowerKind.WATCHTOWER.passive(), "監視塔が支援扱いになっていない");
         assertTrue(TowerKind.WATCHTOWER.statsAt(0).effect().boostDamage() > 0,
                 "監視塔に強化効果がない");
 
-        System.out.printf("  能力持ち %d 種 / 呪詛 +%.0f%% > 庇護 -%.0f%% / 送還 %.1f ブロック%n",
-                withTrait, curse * 100, ward * 100, knockback);
+        System.out.printf("  能力持ち %d 種 / 呪詛 +%.0f%% > 庇護 -%.0f%% / 送還 %.0f 秒に 1 度%n",
+                withTrait, curse * 100, ward * 100, banishCooldown / 20.0);
 
         checkDamagePipeline();
         checkRevive();
         checkPushBack();
+        checkBlink();
+    }
+
+    /**
+     * 瞬移体は壁を跨いで、半径のなかで最もコア寄りの経路へ跳ぶ。
+     *
+     * <p>「経路上を決まった距離だけ進む」実装に戻ると、折り返しを詰めた迷路が
+     * そのまま通用してしまい、この敵の役割（迷路一本槍を咎める）が消える。</p>
+     */
+    private static void checkBlink() {
+        // 折り返し 3 本。通路の間は 2 ブロック＝壁 1 枚ぶんしか離れていない
+        List<Pos> serpentine = List.of(
+                new Pos(0, 65, 0), new Pos(10, 65, 0),
+                new Pos(10, 65, 2), new Pos(0, 65, 2),
+                new Pos(0, 65, 4), new Pos(10, 65, 4));
+        double radius = EnemyKind.BLINKER.trait().blinkRadius();
+
+        EnemyInstance blinker = new EnemyInstance(EnemyKind.BLINKER, null, serpentine, 5000, 1);
+        double total = blinker.remaining();
+        Pos before = blinker.position();
+        blinker.damage(1);
+        double straight = before.distance(blinker.position());
+
+        assertTrue(straight <= radius + 1e-6,
+                "瞬移が半径(" + radius + ")を超えている: " + String.format("%.2f", straight));
+        assertTrue(blinker.travelled() > radius * 2,
+                "瞬移で折り返しを跨げていない: " + String.format("%.2f", blinker.travelled()));
+        assertTrue(blinker.remaining() >= 1.0, "瞬移でコアの直前より先へ行っている");
+
+        // コアの手前まで来ていたら跳ばない。跳んだだけで漏れるのは理不尽
+        EnemyInstance nearCore = new EnemyInstance(EnemyKind.BLINKER, null, serpentine, 5000, 1);
+        nearCore.advanceTo(total - 0.5);
+        nearCore.damage(1);
+        assertTrue(Math.abs(nearCore.travelled() - (total - 0.5)) < 1e-6,
+                "コア直前で跳んで漏れている: " + nearCore.travelled());
+
+        // 能力を持たない敵は撃たれても動かない
+        EnemyInstance grunt = new EnemyInstance(EnemyKind.GRUNT, null, serpentine, 5000, 1);
+        grunt.damage(1);
+        assertTrue(grunt.travelled() == 0.0, "徘徊者が瞬移している");
+
+        System.out.printf("  瞬移: 直線 %.1f ブロックで経路 %.1f ブロックぶん短縮（半径 %.1f）%n",
+                straight, blinker.travelled(), radius);
     }
 
     /**
@@ -954,19 +998,18 @@ public final class SelfCheck {
         System.out.println("  終焉騎: 1 回だけ出発点へ戻り、2 回目は倒れる");
     }
 
-    /** 送還は経路を戻すが、出発点より手前へは戻らない。 */
+    /** 送還は敵を出発点まで丸ごと戻す。すでに出発点にいる敵には空撃ちしない。 */
     private static void checkPushBack() {
         EnemyInstance enemy = fresh(EnemyKind.GRUNT);
         enemy.advanceTo(6.0);
-        assertTrue(enemy.pushBack(4.0), "送還が効かない");
-        assertTrue(Math.abs(enemy.travelled() - 2.0) < 1e-6,
-                "送還の戻し幅が合わない: " + enemy.travelled());
+        assertTrue(enemy.sendToSpawn(), "送還が効かない");
+        assertTrue(enemy.travelled() == 0.0,
+                "出発点まで戻っていない: " + enemy.travelled());
+        assertTrue(enemy.banishOrigin() != null, "送還前の位置が残っていない");
 
-        enemy.pushBack(100);
-        assertTrue(enemy.travelled() == 0.0, "出発点より手前へ戻っている");
-        assertTrue(!enemy.pushBack(4.0), "出発点にいるのに送還が成立している");
+        assertTrue(!enemy.sendToSpawn(), "出発点にいるのに送還が成立している");
 
-        System.out.println("  送還: 経路を戻すが、出発点より手前へは行かない");
+        System.out.println("  送還: 出発点まで丸ごと戻す（湧いたばかりの敵には空撃ちしない）");
     }
 
     /** 直線 1 本の経路を持つ検証用の個体。エンティティは使わないので null でよい。 */

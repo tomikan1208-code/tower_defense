@@ -495,7 +495,7 @@ public final class PlayerSession {
         Component text = Component.text(name + " Lv" + (tower.level() + 1),
                 tower.kind().element().color());
         text = text.append(Component.newline()).append(Component.text(
-                String.format("射程 %.1f  間隔 %dt", stats.range(), stats.cooldown()),
+                String.format("射程 %.1f  間隔 %.1f秒", stats.range(), stats.cooldown() / 20.0),
                 NamedTextColor.WHITE));
         if (tower.kind().targeting() != Targeting.NONE) {
             text = text.append(Component.newline()).append(Component.text(

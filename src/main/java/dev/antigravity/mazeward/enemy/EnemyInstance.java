@@ -17,6 +17,9 @@ public final class EnemyInstance {
 
     private static final int NAME_REFRESH_TICKS = 4;
 
+    /** 瞬移先を探すときに経路を刻む間隔（ブロック）。細かすぎても見た目は変わらない。 */
+    private static final double BLINK_SCAN_STEP = 0.5;
+
     /** 延焼の数字の色。撃たれたぶんと見分けられるように、炎の色で出す。 */
     private static final TextColor BURN_COLOR = NamedTextColor.GOLD;
 
@@ -52,7 +55,13 @@ public final class EnemyInstance {
 
     /** 見せ場（瞬移・送還・復活）が起きたことを戦場側へ伝えるフラグ。 */
     private boolean blinked;
+
+    /** 直近の瞬移で跳ぶ前に居た場所。跳んだ先だけ光らせても、どこから来たのか分からない。 */
+    private Pos blinkOrigin;
     private boolean banished;
+
+    /** 送還される前に居た場所。戻った先だけ光らせても「消えた」ようにしか見えない。 */
+    private Pos banishOrigin;
 
     private int revivesLeft;
 
@@ -212,18 +221,30 @@ public final class EnemyInstance {
     }
 
     /**
-     * 経路を戻す（送還塔）。
+     * 出発点へ送り返す（送還塔）。
      *
-     * <p>倒すのではなく <b>もう一度キルゾーンを通させる</b> ための効果。
-     * 出発点より手前へは戻さない。</p>
+     * <p>倒すのではなく <b>迷路をもう一周させる</b> ための効果。
+     * すでに出発点にいる敵には効かない——60 秒に 1 度の一撃を、
+     * 湧いたばかりの敵に空撃ちさせないため。</p>
      */
-    public boolean pushBack(double distance) {
-        if (distance <= 0.0 || progress <= 0.0) {
+    public boolean sendToSpawn() {
+        if (progress <= 0.0) {
             return false;
         }
-        progress = Math.max(0.0, progress - distance);
+        banishOrigin = position();
+        progress = 0.0;
         banished = true;
         return true;
+    }
+
+    /** 直近の送還で送り返される前に居た場所。 */
+    public Pos banishOrigin() {
+        return banishOrigin;
+    }
+
+    /** 直近の瞬移の出発地点。まだ一度も跳んでいなければ null。 */
+    public Pos blinkOrigin() {
+        return blinkOrigin;
     }
 
     public boolean consumeBlinked() {
@@ -255,6 +276,17 @@ public final class EnemyInstance {
         burnTicks = 0;
         burnDps = 0.0;
         return true;
+    }
+
+    /**
+     * コアに触れても消えず、出発点へ戻る（災厄）。
+     *
+     * <p>HP も状態異常もそのまま残す。全快させると、削った時間がまるごと無駄になり
+     * 「倒す」という選択肢が消えてしまう。<b>削り切るまで何周でも来る</b> だけの意味づけ。</p>
+     */
+    public void returnToStart() {
+        progress = 0.0;
+        leaked = false;
     }
 
     public boolean slowed() {
@@ -296,16 +328,46 @@ public final class EnemyInstance {
         return applied;
     }
 
-    /** 被弾したら経路の先へ飛ぶ。生きているあいだだけ。 */
+    /**
+     * 被弾したら壁を跨いで先の通路へ跳ぶ。生きているあいだだけ。
+     *
+     * <p>経路上を決まった距離だけ進むのではなく、<b>半径の中に入っている経路のうち
+     * いちばんコアに近い点</b> を選ぶ。曲がりくねらせた迷路ほど 1 回の瞬移で
+     * 稼がれるので、「壁で距離を伸ばす」一本槍への答えになる。</p>
+     */
     private void tryBlink() {
         if (!kind.trait().blinks() || blinkCooldown > 0 || hp <= 0.0) {
             return;
         }
+        double target = blinkTarget(kind.trait().blinkRadius());
+        if (target <= progress) {
+            // 跳べる先が無いなら間隔も消費しない。次に撃たれたときに跳べる
+            return;
+        }
         blinkCooldown = kind.trait().blinkCooldown();
-        // コアの直前までしか飛べない。飛んだだけで漏れるのは理不尽
-        progress = Math.min(Math.max(0.0, totalLength - 1.0),
-                progress + kind.trait().blinkDistance());
+        blinkOrigin = positionAt(progress);
+        progress = target;
         blinked = true;
+    }
+
+    /**
+     * 半径 {@code radius} の球に入っている経路のうち、いちばんコアに近い地点の進行度。
+     *
+     * <p>コアの直前までしか候補にしない。跳んだだけで漏れるのは理不尽なので。
+     * 後ろから見ていって最初に届いた点がそのまま答えになる。</p>
+     */
+    private double blinkTarget(double radius) {
+        double limit = Math.max(0.0, totalLength - 1.0);
+        if (limit <= progress) {
+            return progress;
+        }
+        Pos from = positionAt(progress);
+        for (double distance = limit; distance > progress; distance -= BLINK_SCAN_STEP) {
+            if (from.distance(positionAt(distance)) <= radius) {
+                return distance;
+            }
+        }
+        return progress;
     }
 
     /**

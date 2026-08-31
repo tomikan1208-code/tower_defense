@@ -26,6 +26,7 @@ import dev.antigravity.mazeward.world.Palette;
 import dev.antigravity.mazeward.world.TowerModel;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -105,7 +106,7 @@ public abstract class Battlefield {
     protected static final int HEAL_INTERVAL = 20;
 
     /** 妨害者がタワーを黙らせにいく間隔。毎 tick 見る必要はない。 */
-    protected static final int DISABLE_INTERVAL = 10;
+    protected static final int DISABLE_INTERVAL = Trait.DISABLE_REFRESH_TICKS;
     protected static final double CHAIN_RADIUS = 3.6;
     protected static final double PIERCE_WIDTH = 1.3;
 
@@ -490,11 +491,25 @@ public abstract class Battlefield {
     private void showAbilityEffects(EnemyInstance enemy) {
         Pos at = enemy.position();
         if (enemy.consumeBlinked()) {
+            // 壁を跨いで飛ぶので、出発地点も光らせないと「消えて湧いた」ようにしか見えない
+            Pos from = enemy.blinkOrigin();
+            if (from != null) {
+                Overlay.drawBurst(players, from.withY(from.y() + 1.0), Particle.PORTAL, 10, 0.6f);
+            }
             Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.PORTAL, 14, 0.6f);
             playSound(SoundEvent.ENTITY_ENDERMAN_TELEPORT, 0.4f, 1.4f);
         }
         if (enemy.consumeBanished()) {
-            Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.REVERSE_PORTAL, 14, 0.6f);
+            Pos from = enemy.banishOrigin();
+            if (from != null) {
+                Overlay.drawBurst(players, from.withY(from.y() + 1.0), Particle.PORTAL, 24, 0.8f);
+            }
+            Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.REVERSE_PORTAL, 24, 0.8f);
+            playSound(SoundEvent.ENTITY_ENDERMAN_TELEPORT, 0.8f, 0.6f);
+            for (Player player : players) {
+                Overlay.popupText(instance, player, at.withY(at.y() + 2.0),
+                        Component.text("送還", NamedTextColor.DARK_PURPLE), 30);
+            }
         }
     }
 
@@ -643,8 +658,21 @@ public abstract class Battlefield {
     }
 
     private void handleLeak(EnemyInstance enemy) {
-        enemies.remove(enemy);
         Pos at = enemy.position();
+
+        // 災厄はコアに触れても消えない。出発点へ戻り、倒し切るまで何周でも来る
+        if (enemy.kind().boss()) {
+            enemy.returnToStart();
+            enemy.syncBody();
+            Overlay.drawBurst(players, at.withY(at.y() + 1.2), Particle.LARGE_SMOKE, 24, 0.9f);
+            Overlay.drawBurst(players, enemy.position().withY(at.y() + 1.2),
+                    Particle.SOUL_FIRE_FLAME, 24, 0.9f);
+            playSound(SoundEvent.ENTITY_ENDER_DRAGON_GROWL, 0.8f, 0.7f);
+            onEnemyLeaked(enemy, at);
+            return;
+        }
+
+        enemies.remove(enemy);
         enemy.body().remove();
 
         Overlay.drawBurst(players, at.withY(at.y() + 1.0), Particle.LARGE_SMOKE, 12, 0.5f);
@@ -838,7 +866,21 @@ public abstract class Battlefield {
                 spawnShot(tower, muzzle, targetPos.withY(targetPos.y() + 0.8));
                 hit(tower, target, stats, stats.damage());
                 if (target.alive()) {
-                    target.pushBack(stats.effect().knockback());
+                    target.sendToSpawn();
+                }
+                // 「一斉送還」はコアに近いほうから順に、あと何体か道連れにする
+                int extra = (int) Math.round(stats.effect().banishTargets()) - 1;
+                for (EnemyInstance other : banishOrder(tower, range)) {
+                    if (extra <= 0) {
+                        break;
+                    }
+                    if (other == target || !other.alive()) {
+                        continue;
+                    }
+                    hit(tower, other, stats, stats.damage());
+                    if (other.alive() && other.sendToSpawn()) {
+                        extra--;
+                    }
                 }
             }
             case PIERCE -> {
@@ -976,6 +1018,10 @@ public abstract class Battlefield {
             if (distance > range) {
                 continue;
             }
+            // 送還は 60 秒に 1 度きり。すでに出発点にいる敵を撃つと空撃ちになる
+            if (tower.kind().style() == AttackStyle.BANISH && enemy.travelled() <= 0.0) {
+                continue;
+            }
             double score = switch (mode) {
                 case UNAFFECTED -> enemy.affected() ? 0.0 : 1.0;
                 case TOUGHEST -> enemy.hp();
@@ -993,6 +1039,22 @@ public abstract class Battlefield {
             }
         }
         return best;
+    }
+
+    /**
+     * 送還の巻き込み順。コアに近い敵から並べる。
+     *
+     * <p>60 秒に 1 度しか撃てないので、<b>いちばん漏れそうな敵から</b>戻すのが常に正しい。</p>
+     */
+    private List<EnemyInstance> banishOrder(TowerInstance tower, double range) {
+        List<EnemyInstance> inRange = new ArrayList<>();
+        for (EnemyInstance enemy : enemies) {
+            if (enemy.alive() && distanceFromTower(tower, enemy.position()) <= range) {
+                inRange.add(enemy);
+            }
+        }
+        inRange.sort(Comparator.comparingDouble(EnemyInstance::remaining));
+        return inRange;
     }
 
     /** その敵の周りにいる敵の数。範囲・連鎖の巻き込みがいちばん増える一体を探すのに使う。 */
