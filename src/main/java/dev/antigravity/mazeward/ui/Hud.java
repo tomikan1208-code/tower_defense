@@ -245,6 +245,10 @@ public final class Hud {
                 item(Material.IRON_SWORD, Component.text("対戦 — 送り合い", NamedTextColor.RED),
                         Component.text("島を守りながら相手にモンスターを送る", NamedTextColor.GRAY),
                         Component.text("右クリックで待機部屋へ移動", NamedTextColor.DARK_GRAY)));
+        // 人が集まらなくても遊べる 2 つ。ここに置いておかないと
+        // 「1 人だと対戦モードに入れない」ゲームに見えてしまう
+        player.getInventory().setItemStack(2, SpectatorHud.versusAiItem());
+        player.getInventory().setItemStack(3, SpectatorHud.spectateItem());
     }
 
     /**

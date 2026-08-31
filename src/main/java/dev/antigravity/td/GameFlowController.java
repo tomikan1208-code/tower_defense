@@ -23,6 +23,7 @@ import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
 import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockInteractEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
+import net.minestom.server.event.player.PlayerEntityInteractEvent;
 import net.minestom.server.event.player.PlayerHandAnimationEvent;
 import net.minestom.server.event.player.PlayerUseItemEvent;
 import net.minestom.server.inventory.Inventory;
@@ -31,6 +32,7 @@ import net.minestom.server.instance.Instance;
 import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.instance.block.Block;
 import net.minestom.server.instance.generator.Generator;
+import net.minestom.server.color.Color;
 import net.minestom.server.item.ItemStack;
 import net.minestom.server.item.Material;
 import net.minestom.server.network.packet.server.play.ParticlePacket;
@@ -38,14 +40,18 @@ import net.minestom.server.particle.Particle;
 import net.minestom.server.potion.Potion;
 import net.minestom.server.potion.PotionEffect;
 import net.minestom.server.world.DimensionType;
-
+ 
 public final class GameFlowController {
     private static final int LOBBY_Y = 50;
     private static final int ROADMAP_Y = 50;
     private static final int STAGE_Y = 50;
     private static final int OBSTACLE_Y = STAGE_Y + 1;
     private static final int LOBBY_GATE_Z = 8;
+    private static final int PREP_DURATION_TICKS = 20 * 90;
+    private static final Material READY_ITEM_MATERIAL = Material.LIME_DYE;
     private static final int NIGHT_VISION_DURATION_TICKS = 20 * 60 * 60;
+    private static final Particle ROADMAP_BASE_PARTICLE = Particle.DUST.withColor(new Color(170, 170, 170)).withScale(1.2f);
+    private static final Particle ROADMAP_HIGHLIGHT_PARTICLE = Particle.DUST.withColor(new Color(255, 220, 0)).withScale(1.8f);
 
     private final InstanceContainer lobby;
     private final InstanceContainer roadmap;
@@ -65,6 +71,7 @@ public final class GameFlowController {
     private final Map<UUID, Inventory> deckDetailMenuByPlayer = new HashMap<>();
     private final Map<UUID, Integer> deckMenuIndexByPlayer = new HashMap<>();
     private final Map<UUID, RoadNode> selectedRoadNodeByPlayer = new HashMap<>();
+    private final Map<UUID, BlockVec> buildPreviewOriginByPlayer = new HashMap<>();
     private int particleTickCounter = 0;
 
     private final BlockVec lobbyEmeraldButton = new BlockVec(0, LOBBY_Y + 1, 0);
@@ -96,9 +103,9 @@ public final class GameFlowController {
         if (!(instance instanceof InstanceContainer stageInstance) || !stageGames.containsKey(stageInstance)) {
             return;
         }
-        
-        // 左クリックで配置選択をキャンセル
+
         if (selectedBuildByPlayer.remove(player.getUuid()) != null) {
+            buildPreviewOriginByPlayer.remove(player.getUuid());
             player.sendMessage(Component.text("配置選択をキャンセルしました", NamedTextColor.GRAY));
         }
     }
@@ -114,9 +121,20 @@ public final class GameFlowController {
         }
     }
 
+    public void onEntityInteract(PlayerEntityInteractEvent event) {
+        Player player = event.getPlayer();
+        Instance instance = player.getInstance();
+        if (!(instance instanceof InstanceContainer stageInstance) || !stageGames.containsKey(stageInstance)) {
+            return;
+        }
+
+        // 右クリック対象のタワー強化は別イベント側で処理する想定。
+    }
+
     public void moveToLobby(Player player) {
         player.setInstance(lobby, new Pos(0.5, LOBBY_Y + 1, 0.5));
         applyNightVision(player);
+        buildPreviewOriginByPlayer.remove(player.getUuid());
         player.sendMessage(Component.text("ロビーに戻りました", NamedTextColor.AQUA));
     }
 
@@ -124,6 +142,7 @@ public final class GameFlowController {
         player.setInstance(roadmap, new Pos(0.5, ROADMAP_Y + 1, 0.5));
         applyNightVision(player);
         roadmapClearedLayerByPlayer.putIfAbsent(player.getUuid(), 0);
+        buildPreviewOriginByPlayer.remove(player.getUuid());
         player.sendMessage(Component.text("ロードマップを表示します。3×3のピラミッド中央をクリックしてステージを選択", NamedTextColor.GOLD));
         player.sendMessage(Component.text("現在の解放層: " + getRoadmapClearedLayer(player) + " / 8", NamedTextColor.YELLOW));
         if (!selectedDeckByPlayer.containsKey(player.getUuid())) {
@@ -138,6 +157,7 @@ public final class GameFlowController {
             player.sendMessage(Component.text("ステージ内でのみ開始できます", NamedTextColor.RED));
             return;
         }
+        clearPreparation(player.getInstance());
         game.startWave();
     }
 
@@ -204,9 +224,6 @@ public final class GameFlowController {
             return;
         }
 
-        deckDetailMenuByPlayer.remove(uuid);
-        deckMenuIndexByPlayer.remove(uuid);
-
         Inventory menu = new Inventory(InventoryType.CHEST_3_ROW, Component.text("デッキを選択"));
         fillMenuBackground(menu, Material.GRAY_STAINED_GLASS_PANE, Component.text(" "));
 
@@ -220,11 +237,9 @@ public final class GameFlowController {
 
         deckSelectionMenuByPlayer.put(uuid, menu);
         player.openInventory(menu);
-        player.sendMessage(Component.text("デッキを1つ選んでください。チェストで詳細、緑のガラスで確定です", NamedTextColor.GOLD));
     }
 
     private void handleSelectionClick(Player player, int slot) {
-        UUID uuid = player.getUuid();
         int deckIndex = selectionSlotToIndex(slot);
         if (deckIndex >= 0) {
             openDeckDetail(player, deckIndex);
@@ -273,12 +288,12 @@ public final class GameFlowController {
 
         detail.setItemStack(18, ItemStack.builder(Material.ARROW)
                 .customName(Component.text("戻る"))
-            .lore(Component.text("デッキ一覧に戻ります"))
+                .lore(Component.text("デッキ一覧に戻ります"))
                 .hideExtraTooltip()
                 .build());
         detail.setItemStack(26, ItemStack.builder(Material.GREEN_STAINED_GLASS_PANE)
                 .customName(Component.text("確定"))
-            .lore(Component.text(offer.summary()), Component.text("このデッキを選択します"))
+                .lore(Component.text(offer.summary()), Component.text("このデッキを選択します"))
                 .hideExtraTooltip()
                 .build());
 
@@ -325,11 +340,23 @@ public final class GameFlowController {
     }
 
     private ItemStack createTowerItem(BuildSelection tower) {
+        TowerType type = tower.towerType();
+        double reloadSeconds = type.cooldownTicks() / 20.0;
+        
         return ItemStack.builder(tower.material())
                 .customName(Component.text(tower.displayName(), NamedTextColor.AQUA))
                 .lore(
-                Component.text("種類: タワー"),
-                Component.text("操作: 右クリックで選択し、もう一度右クリックで設置"))
+                Component.text("種類: タワー", NamedTextColor.GRAY),
+                Component.text(""),
+                Component.text("サイズ: " + type.sizeX() + "x" + type.sizeZ(), NamedTextColor.WHITE),
+                Component.text("連射速度: " + String.format("%.2f", reloadSeconds) + "秒", NamedTextColor.WHITE),
+                Component.text("攻撃力: " + String.format("%.1f", type.damage()), NamedTextColor.WHITE),
+                Component.text("値段: " + type.cost() + "ゴールド", NamedTextColor.GOLD),
+                Component.text("射程: " + String.format("%.1f", type.range()), NamedTextColor.WHITE),
+                Component.text(""),
+                Component.text(type.description(), NamedTextColor.YELLOW),
+                Component.text(""),
+                Component.text("操作: 右クリックで選択し、もう一度右クリックで設置", NamedTextColor.GRAY))
                 .hideExtraTooltip()
                 .build();
     }
@@ -338,8 +365,11 @@ public final class GameFlowController {
         return ItemStack.builder(block.material())
                 .customName(Component.text(block.displayName(), NamedTextColor.YELLOW))
                 .lore(
-                Component.text("種類: ブロック"),
-                        Component.text("形状配置用アイテム"))
+                Component.text("種類: ブロック", NamedTextColor.GRAY),
+                Component.text(""),
+                Component.text(block.description(), NamedTextColor.WHITE),
+                Component.text(""),
+                Component.text("形状配置用アイテム", NamedTextColor.GRAY))
                 .hideExtraTooltip()
                 .build();
     }
@@ -439,6 +469,10 @@ public final class GameFlowController {
         if (particleTickCounter % 8 == 0) {
             showRoadmapPathParticles();
             showRoadmapNextLayerParticles();
+        }
+
+        // 敵導線は毎ティック表示
+        if (particleTickCounter % 1 == 0) {
             showStageEnemyPathParticles();
         }
 
@@ -516,15 +550,16 @@ public final class GameFlowController {
 
         player.setInstance(instance, node.stageType().spawn());
         applyNightVision(player);
-        prepTicksRemaining.put(player.getUuid(), 20 * 30);
+        prepTicksRemaining.put(player.getUuid(), PREP_DURATION_TICKS);
         prepStageByPlayer.put(player.getUuid(), node.stageType());
         selectedBuildByPlayer.remove(player.getUuid());
+        buildPreviewOriginByPlayer.remove(player.getUuid());
         deckViewModeByPlayer.remove(player.getUuid());
         giveDeckItems(player, deck);
         if (node.stageType() == StageType.EVENT) {
             player.sendMessage(Component.text(node.stageType().displayName() + " 層 " + node.layer() + " に到着しました。アイテムを獲得します", NamedTextColor.GOLD));
         } else {
-            player.sendMessage(Component.text(node.stageType().displayName() + " 層 " + node.layer() + " に進みました。準備時間30秒", NamedTextColor.GREEN));
+            player.sendMessage(Component.text(node.stageType().displayName() + " 層 " + node.layer() + " に進みました。準備時間90秒", NamedTextColor.GREEN));
         }
         player.sendMessage(Component.text("コマンド: !start / !state / !tower <type>", NamedTextColor.YELLOW));
         player.sendMessage(Component.text("アイテム右クリック: 1回目で選択、同じアイテムをもう一度右クリックでプレビュー位置に設置", NamedTextColor.GRAY));
@@ -539,6 +574,11 @@ public final class GameFlowController {
         DeckOffer deck = selectedDeckByPlayer.get(player.getUuid());
         if (deck != null) {
             Material material = hand.material();
+            if (material == READY_ITEM_MATERIAL) {
+                event.setCancelled(true);
+                startWaveFromPreparation(player, stageInstance);
+                return;
+            }
             if (material == Material.COMPASS) {
                 event.setCancelled(true);
                 showTowerDeckItems(player, deck);
@@ -567,6 +607,7 @@ public final class GameFlowController {
         BuildSelection selected = selectedBuildByPlayer.get(uuid);
         if (selected != picked) {
             selectedBuildByPlayer.put(uuid, picked);
+            buildPreviewOriginByPlayer.put(uuid, previewOrigin(player));
             player.sendMessage(Component.text("選択: " + picked.displayName(), NamedTextColor.AQUA));
             return;
         }
@@ -580,6 +621,7 @@ public final class GameFlowController {
                 consumeOneMainHand(player);
                 player.sendMessage(Component.text("配置: " + picked.displayName(), NamedTextColor.GREEN));
                 selectedBuildByPlayer.remove(uuid);
+                buildPreviewOriginByPlayer.remove(uuid);
             } else {
                 player.sendMessage(Component.text("配置失敗: 重複または保護エリアです", NamedTextColor.RED));
             }
@@ -592,7 +634,11 @@ public final class GameFlowController {
             return;
         }
 
-        game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y);
+        boolean placed = game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y + 1);
+        if (placed) {
+            selectedBuildByPlayer.remove(uuid);
+            buildPreviewOriginByPlayer.remove(uuid);
+        }
         // タワーは在庫無限（非消費）。ゴールド不足は tryPlaceTowerAt 側で拒否する。
         // 配置後も選択状態を保持（同じタワーを複数配置可能）
     }
@@ -603,6 +649,11 @@ public final class GameFlowController {
         DeckOffer deck = selectedDeckByPlayer.get(player.getUuid());
         if (deck != null) {
             Material material = hand.material();
+            if (material == READY_ITEM_MATERIAL) {
+                event.setCancelled(true);
+                startWaveFromPreparation(player, stageInstance);
+                return;
+            }
             // ここではカテゴリクリックは処理せず、配置物のみ処理
         }
 
@@ -611,23 +662,26 @@ public final class GameFlowController {
             return;
         }
 
-        event.setCancelled(true);
         UUID uuid = player.getUuid();
         BuildSelection selected = selectedBuildByPlayer.get(uuid);
         if (selected != picked) {
+            event.setCancelled(true);
             selectedBuildByPlayer.put(uuid, picked);
+            buildPreviewOriginByPlayer.put(uuid, event.getBlockPosition());
             player.sendMessage(Component.text("選択: " + picked.displayName(), NamedTextColor.AQUA));
             return;
         }
 
+        event.setCancelled(true);
+        buildPreviewOriginByPlayer.put(uuid, event.getBlockPosition());
         BlockVec origin = previewOrigin(player);
         if (picked.kind() == BuildKind.BLOCK) {
             boolean ok = placeBlockShape(stageInstance, picked, origin);
             if (ok) {
                 consumeOneMainHand(player);
                 player.sendMessage(Component.text("配置: " + picked.displayName(), NamedTextColor.GREEN));
-                // 配置後は選択をクリア
                 selectedBuildByPlayer.remove(uuid);
+                buildPreviewOriginByPlayer.remove(uuid);
             } else {
                 player.sendMessage(Component.text("配置失敗: 重複または保護エリアです", NamedTextColor.RED));
             }
@@ -639,12 +693,30 @@ public final class GameFlowController {
             return;
         }
 
-        game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y);
+        boolean placed = game.tryPlaceTowerAt(player, picked.towerType().key(), origin.blockX(), origin.blockZ(), OBSTACLE_Y + 1);
+        if (placed) {
+            selectedBuildByPlayer.remove(uuid);
+            buildPreviewOriginByPlayer.remove(uuid);
+        }
         // タワーは在庫無限（非消費）。ゴールド不足は tryPlaceTowerAt 側で拒否する。
         // 配置後も選択状態を保持（同じタワーを複数配置可能）
     }
 
+    private int getTerrainHeight(InstanceContainer instance, int x, int z) {
+        // ブロックの上を探す（下からスキャン）
+        for (int y = STAGE_Y; y <= OBSTACLE_Y + 10; y++) {
+            if (instance.getBlock(x, y, z) != Block.AIR) {
+                return y - 1;
+            }
+        }
+        return STAGE_Y;
+    }
+
     private BlockVec previewOrigin(Player player) {
+        BlockVec remembered = buildPreviewOriginByPlayer.get(player.getUuid());
+        if (remembered != null) {
+            return remembered;
+        }
         Pos pos = player.getPosition();
         Point dir = pos.direction();
         int x = (int) Math.floor(pos.x() + dir.x() * 4.0);
@@ -699,6 +771,7 @@ public final class GameFlowController {
                 .lore(
                         Component.text("- スロット1: タワー選択を開く"),
                         Component.text("- スロット2: ブロック選択を開く"),
+                Component.text("- スロット3: 準備完了で即Wave開始"),
                         Component.text("- 戻るでカテゴリ選択へ戻る"),
                         Component.text("- アイテム右クリックで選択/配置"))
                 .hideExtraTooltip()
@@ -717,6 +790,7 @@ public final class GameFlowController {
                 .lore(Component.text("右クリックでブロック一覧を開く"), Component.text(deck.blocksSummary()))
                 .hideExtraTooltip()
                 .build());
+        player.getInventory().setItemStack(2, createReadyItem());
         deckViewModeByPlayer.put(player.getUuid(), DeckViewMode.ROOT);
     }
 
@@ -727,13 +801,17 @@ public final class GameFlowController {
                 .lore(Component.text("カテゴリ選択に戻る"))
                 .hideExtraTooltip()
                 .build());
+        player.getInventory().setItemStack(2, createPreparationPlaceholderItem());
 
         int slot = 1;
         for (BuildSelection towerSelection : deck.towers()) {
+            if (slot == 2) {
+                slot++;
+            }
             if (slot >= 9) {
                 break;
             }
-            player.getInventory().setItemStack(slot++, ItemStack.of(towerSelection.material(), 1));
+            player.getInventory().setItemStack(slot++, createTowerHotbarItem(towerSelection));
         }
         deckViewModeByPlayer.put(player.getUuid(), DeckViewMode.TOWERS);
     }
@@ -745,6 +823,7 @@ public final class GameFlowController {
                 .lore(Component.text("カテゴリ選択に戻る"))
                 .hideExtraTooltip()
                 .build());
+        player.getInventory().setItemStack(2, createPreparationPlaceholderItem());
 
         Map<BuildSelection, Integer> counts = new java.util.LinkedHashMap<>();
         for (BuildSelection blockSelection : deck.blocks()) {
@@ -753,12 +832,51 @@ public final class GameFlowController {
 
         int slot = 1;
         for (Map.Entry<BuildSelection, Integer> entry : counts.entrySet()) {
+            if (slot == 2) {
+                slot++;
+            }
             if (slot >= 9) {
                 break;
             }
-            player.getInventory().setItemStack(slot++, ItemStack.of(entry.getKey().material(), entry.getValue()));
+            player.getInventory().setItemStack(slot++, createBlockHotbarItem(entry.getKey(), entry.getValue()));
         }
         deckViewModeByPlayer.put(player.getUuid(), DeckViewMode.BLOCKS);
+    }
+
+    private ItemStack createTowerHotbarItem(BuildSelection tower) {
+        TowerType type = tower.towerType();
+        return ItemStack.builder(tower.material())
+                .amount(1)
+                .customName(Component.text(tower.displayName(), NamedTextColor.AQUA))
+                .lore(
+                        Component.text("攻撃力: " + String.format("%.1f", type.damage()), NamedTextColor.WHITE),
+                        Component.text("連射速度: " + String.format("%.2f", 20.0 / type.cooldownTicks()) + "回/秒", NamedTextColor.WHITE),
+                        Component.text("射程: " + String.format("%.1f", type.range()), NamedTextColor.WHITE),
+                        Component.text("コスト: " + type.cost() + "G", NamedTextColor.GOLD),
+                        Component.text("効果: " + type.effectLabel(), NamedTextColor.YELLOW),
+                        Component.text("右クリックで選択/設置", NamedTextColor.GRAY))
+                .hideExtraTooltip()
+                .build();
+    }
+
+    private ItemStack createBlockHotbarItem(BuildSelection block, int amount) {
+        return ItemStack.builder(block.material())
+                .amount(Math.max(1, amount))
+                .customName(Component.text(block.displayName(), NamedTextColor.YELLOW))
+                .lore(
+                        Component.text("形状配置用ブロック", NamedTextColor.WHITE),
+                        Component.text("所持数: " + amount, NamedTextColor.GOLD),
+                        Component.text("右クリックで選択/設置", NamedTextColor.GRAY))
+                .hideExtraTooltip()
+                .build();
+    }
+
+    private ItemStack createPreparationPlaceholderItem() {
+        return ItemStack.builder(Material.GRAY_STAINED_GLASS_PANE)
+                .customName(Component.text("準備完了", NamedTextColor.DARK_GRAY))
+                .lore(Component.text("ルートページのみで表示", NamedTextColor.GRAY))
+                .hideExtraTooltip()
+                .build();
     }
 
     private void clearBuildSlots(Player player) {
@@ -768,6 +886,40 @@ public final class GameFlowController {
     private void clearHotbar(Player player) {
         for (int slot = 0; slot < 9; slot++) {
             player.getInventory().setItemStack(slot, ItemStack.AIR);
+        }
+    }
+
+    private ItemStack createReadyItem() {
+        return ItemStack.builder(READY_ITEM_MATERIAL)
+                .customName(Component.text("準備完了", NamedTextColor.GREEN))
+                .lore(Component.text("右クリックで即Wave開始"))
+                .hideExtraTooltip()
+                .build();
+    }
+
+    private void startWaveFromPreparation(Player player, InstanceContainer stageInstance) {
+        TDGame game = stageGames.get(stageInstance);
+        if (game == null) {
+            player.sendMessage(Component.text("ステージ内でのみ開始できます", NamedTextColor.RED));
+            return;
+        }
+
+        clearPreparation(stageInstance);
+        game.startWave();
+        player.sendMessage(Component.text("準備完了: Wave開始", NamedTextColor.GREEN));
+    }
+
+    private void clearPreparation(Instance instance) {
+        if (!(instance instanceof InstanceContainer stageInstance)) {
+            return;
+        }
+
+        for (Player online : MinecraftServer.getConnectionManager().getOnlinePlayers()) {
+            if (online.getInstance() != stageInstance) {
+                continue;
+            }
+            prepTicksRemaining.remove(online.getUuid());
+            prepStageByPlayer.remove(online.getUuid());
         }
     }
 
@@ -1041,7 +1193,7 @@ public final class GameFlowController {
                     double x = sx + (ex - sx) * t + 0.5;
                     double y = sy + (ey - sy) * t + 0.25;
                     double z = sz + (ez - sz) * t + 0.5;
-                    player.sendPacket(new ParticlePacket(Particle.DUST, true, false, x, y, z, 1f, 0.08f, 0.08f, 1.8f, 0));
+                    player.sendPacket(new ParticlePacket(ROADMAP_BASE_PARTICLE, true, false, x, y, z, 0f, 0f, 0f, 0f, 0));
                 }
             }
         }
@@ -1098,8 +1250,7 @@ public final class GameFlowController {
                     double x = sx + (ex - sx) * t + 0.5;
                     double y = sy + (ey - sy) * t + 0.25;
                     double z = sz + (ez - sz) * t + 0.5;
-                    // 黄色パーティクル（DUST で黄色 RGB: 255, 255, 0）
-                    player.sendPacket(new ParticlePacket(Particle.DUST, true, false, x, y, z, 1f, 1f, 0f, 2f, 0));
+                    player.sendPacket(new ParticlePacket(ROADMAP_HIGHLIGHT_PARTICLE, true, false, x, y, z, 0f, 0f, 0f, 0f, 0));
                 }
             }
         }
@@ -1118,22 +1269,67 @@ public final class GameFlowController {
             BlockVec start = new BlockVec(-20, OBSTACLE_Y, -20);
             BlockVec goal = nearestGoalCell(start);
             List<BlockVec> path = findPathAStar(stageInstance, start, goal);
-            for (BlockVec node : path) {
-                player.sendPacket(new ParticlePacket(
-                    Particle.CRIT,
-                    true,
-                    false,
-                    node.blockX() + 0.5,
-                    node.blockY() + 0.15,
-                    node.blockZ() + 0.5,
-                    0.02f,
-                    0.02f,
-                    0.02f,
-                    0f,
-                    1
-                ));
+            renderEnemyPathAsSegments(player, compressPathTurns(path));
+        }
+    }
+
+    private void renderEnemyPathAsSegments(Player player, List<BlockVec> path) {
+        if (path.size() < 2) {
+            return;
+        }
+
+        for (int i = 0; i < path.size() - 1; i++) {
+            BlockVec from = path.get(i);
+            BlockVec to = path.get(i + 1);
+            int dx = to.blockX() - from.blockX();
+            int dz = to.blockZ() - from.blockZ();
+            int steps = Math.max(Math.abs(dx), Math.abs(dz)) * 4;
+            if (steps <= 0) {
+                continue;
+            }
+
+            // 中心固定を避けるため、各線分ごとに少しだけオフセットする。
+            double hash = ((from.blockX() * 31 + from.blockZ() * 17 + to.blockX() * 13 + to.blockZ() * 7) & 3) - 1.5;
+            double laneOffset = hash * 0.12;
+            double nx = -Math.signum(dz);
+            double nz = Math.signum(dx);
+            double ox = nx * laneOffset;
+            double oz = nz * laneOffset;
+
+            for (int step = 0; step <= steps; step++) {
+                double t = (double) step / (double) steps;
+                // 接続点で線が切れないよう、端点ではオフセットを0にする。
+                double blend = Math.sin(Math.PI * t);
+                double x = from.blockX() + (dx * t) + 0.5 + (ox * blend);
+                double y = from.blockY() + 0.14;
+                double z = from.blockZ() + (dz * t) + 0.5 + (oz * blend);
+                player.sendPacket(new ParticlePacket(Particle.DUST, true, false, x, y, z, 1f, 0.25f, 0.25f, 1.2f, 0));
             }
         }
+    }
+
+    private List<BlockVec> compressPathTurns(List<BlockVec> path) {
+        if (path.size() <= 2) {
+            return path;
+        }
+
+        List<BlockVec> out = new ArrayList<>();
+        out.add(path.get(0));
+
+        int prevDx = path.get(1).blockX() - path.get(0).blockX();
+        int prevDz = path.get(1).blockZ() - path.get(0).blockZ();
+        for (int i = 2; i < path.size(); i++) {
+            int dx = path.get(i).blockX() - path.get(i - 1).blockX();
+            int dz = path.get(i).blockZ() - path.get(i - 1).blockZ();
+            if (dx != prevDx || dz != prevDz) {
+                out.add(path.get(i - 1));
+                prevDx = dx;
+                prevDz = dz;
+            }
+        }
+
+        out.add(path.get(path.size() - 1));
+        return out;
     }
 
     private void showBuildPreviewParticles() {
@@ -1234,34 +1430,11 @@ public final class GameFlowController {
     }
 
     private void showProjectileParticles() {
-        for (Map.Entry<InstanceContainer, TDGame> entry : stageGames.entrySet()) {
-            TDGame game = entry.getValue();
-            for (Projectile proj : game.projectiles()) {
-                Pos pos = proj.position();
-                TowerType.ProjectileColor color = proj.color();
-                
-                MinecraftServer.getConnectionManager().getOnlinePlayers().stream()
-                        .filter(p -> p.getInstance() == entry.getKey())
-                        .forEach(player -> player.sendPacket(new ParticlePacket(
-                                Particle.END_ROD,
-                                true,
-                                false,
-                                pos.x(),
-                                pos.y(),
-                                pos.z(),
-                                color.r * 0.5f,
-                                color.g * 0.5f,
-                                color.b * 0.5f,
-                                0.5f,
-                                2
-                        )));
-            }
-        }
+        // 発射体は display エンティティ側で描画する。
     }
 
     private void showDamageNumbers() {
-        // この機能は敵の体力表示で実装済みです（EnemyUnit.syncEntity()）
-        // 演出用の追加パーティクルはここで追加できます
+        // ダメージ表示は TDGame 側の display エンティティで描画する。
     }
 
     private List<BlockVec> findPathAStar(InstanceContainer instance, BlockVec start, BlockVec goal) {
@@ -1348,20 +1521,8 @@ public final class GameFlowController {
     }
 
     private BlockVec nearestGoalCell(BlockVec start) {
-        int bestDist = Integer.MAX_VALUE;
-        BlockVec best = new BlockVec(0, OBSTACLE_Y, 0);
-        for (int[] offset : GOAL_AREA_OFFSETS_3X3) {
-            int gx = offset[0];
-            int gz = offset[1];
-            int dx = gx - start.blockX();
-            int dz = gz - start.blockZ();
-            int dist = dx * dx + dz * dz;
-            if (dist < bestDist) {
-                bestDist = dist;
-                best = new BlockVec(gx, OBSTACLE_Y, gz);
-            }
-        }
-        return best;
+        // ゴール位置はタワー配置地点の角（19, 19）に固定
+        return new BlockVec(19, OBSTACLE_Y, 19);
     }
 
     private List<BlockVec> reconstructPath(PathNode end, int y) {
@@ -1518,11 +1679,6 @@ public final class GameFlowController {
             instance.setBlock(-30, STAGE_Y + 1, z, Block.LANTERN);
             instance.setBlock(30, STAGE_Y, z, Block.BLACKSTONE);
             instance.setBlock(30, STAGE_Y + 1, z, Block.LANTERN);
-        }
-
-        // 敵ゴール地点（3x3焚き火を1マス浮かせて配置）
-        for (int[] offset : GOAL_AREA_OFFSETS_3X3) {
-            instance.setBlock(offset[0], STAGE_Y + 2, offset[1], Block.CAMPFIRE);
         }
 
         // RED スポーン位置（敵が出現する 3×3）
@@ -1771,19 +1927,19 @@ public final class GameFlowController {
     }
 
     private enum BuildSelection {
-        BLOCK_L("L字ブロック", BuildKind.BLOCK, Material.OAK_PLANKS, Block.OAK_PLANKS, null, new int[][] {{0, 0}, {1, 0}, {0, 1}}),
-        BLOCK_L_REV("逆L字ブロック", BuildKind.BLOCK, Material.SPRUCE_PLANKS, Block.SPRUCE_PLANKS, null, new int[][] {{0, 0}, {-1, 0}, {0, 1}}),
-        BLOCK_T("T字ブロック", BuildKind.BLOCK, Material.BIRCH_PLANKS, Block.BIRCH_PLANKS, null, new int[][] {{0, 0}, {-1, 0}, {1, 0}, {0, 1}}),
-        BLOCK_SQUARE("正方形ブロック", BuildKind.BLOCK, Material.STONE_BRICKS, Block.STONE_BRICKS, null, new int[][] {{0, 0}, {1, 0}, {0, 1}, {1, 1}}),
-        BLOCK_CROSS("十字ブロック", BuildKind.BLOCK, Material.MOSSY_STONE_BRICKS, Block.MOSSY_STONE_BRICKS, null, new int[][] {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}}),
-        BLOCK_LINE("直線ブロック", BuildKind.BLOCK, Material.DEEPSLATE_BRICKS, Block.DEEPSLATE_BRICKS, null, new int[][] {{0, 0}, {1, 0}, {2, 0}, {3, 0}}),
+        BLOCK_L("L字ブロック", BuildKind.BLOCK, Material.OAK_PLANKS, Block.OAK_PLANKS, null, new int[][] {{0, 0}, {1, 0}, {0, 1}}, "L字形の3ブロック。\n敵経路をよじ登らせるのに最適。"),
+        BLOCK_L_REV("逆L字ブロック", BuildKind.BLOCK, Material.SPRUCE_PLANKS, Block.SPRUCE_PLANKS, null, new int[][] {{0, 0}, {-1, 0}, {0, 1}}, "逆L字形の3ブロック。\n配置パターンが豊富で応用性が高い。"),
+        BLOCK_T("T字ブロック", BuildKind.BLOCK, Material.BIRCH_PLANKS, Block.BIRCH_PLANKS, null, new int[][] {{0, 0}, {-1, 0}, {1, 0}, {0, 1}}, "T字形の4ブロック。\n広いエリアをカバーでき、経路制御力が高い。"),
+        BLOCK_SQUARE("正方形ブロック", BuildKind.BLOCK, Material.STONE_BRICKS, Block.STONE_BRICKS, null, new int[][] {{0, 0}, {1, 0}, {0, 1}, {1, 1}}, "2x2の正方形ブロック。\n安定した形状で敵を効果的に遅延させる。"),
+        BLOCK_CROSS("十字ブロック", BuildKind.BLOCK, Material.MOSSY_STONE_BRICKS, Block.MOSSY_STONE_BRICKS, null, new int[][] {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}}, "十字形の5ブロック。\n最大級のブロック群で敵を大きく迂回させる。"),
+        BLOCK_LINE("直線ブロック", BuildKind.BLOCK, Material.DEEPSLATE_BRICKS, Block.DEEPSLATE_BRICKS, null, new int[][] {{0, 0}, {1, 0}, {2, 0}, {3, 0}}, "直線状の4ブロック。\n狭い通路をふさぎ、敵を強制的に迂回させる。"),
 
-        TOWER_BASIC("基本タワー", BuildKind.TOWER, Material.SKELETON_SPAWN_EGG, null, TowerType.BASIC, rectangleOffsets(TowerType.BASIC)),
-        TOWER_FLAME("火炎放射タワー", BuildKind.TOWER, Material.BLAZE_SPAWN_EGG, null, TowerType.FLAMETHROWER, rectangleOffsets(TowerType.FLAMETHROWER)),
-        TOWER_FROST("フロストタワー", BuildKind.TOWER, Material.SNOW_GOLEM_SPAWN_EGG, null, TowerType.FROST, rectangleOffsets(TowerType.FROST)),
-        TOWER_BALL("雷球タワー", BuildKind.TOWER, Material.VEX_SPAWN_EGG, null, TowerType.LIGHTNING_BALL, rectangleOffsets(TowerType.LIGHTNING_BALL)),
-        TOWER_POISON("毒タワー", BuildKind.TOWER, Material.CAVE_SPIDER_SPAWN_EGG, null, TowerType.POISON, rectangleOffsets(TowerType.POISON)),
-        TOWER_SNOWBALL("スノーボールタワー", BuildKind.TOWER, Material.IRON_GOLEM_SPAWN_EGG, null, TowerType.SNOWBALL, rectangleOffsets(TowerType.SNOWBALL));
+        TOWER_BASIC("基本タワー", BuildKind.TOWER, Material.SKELETON_SPAWN_EGG, null, TowerType.BASIC, rectangleOffsets(TowerType.BASIC), ""),
+        TOWER_FLAME("火炎放射タワー", BuildKind.TOWER, Material.BLAZE_SPAWN_EGG, null, TowerType.FLAMETHROWER, rectangleOffsets(TowerType.FLAMETHROWER), ""),
+        TOWER_FROST("フロストタワー", BuildKind.TOWER, Material.SNOW_GOLEM_SPAWN_EGG, null, TowerType.FROST, rectangleOffsets(TowerType.FROST), ""),
+        TOWER_BALL("雷球タワー", BuildKind.TOWER, Material.VEX_SPAWN_EGG, null, TowerType.LIGHTNING_BALL, rectangleOffsets(TowerType.LIGHTNING_BALL), ""),
+        TOWER_POISON("毒タワー", BuildKind.TOWER, Material.CAVE_SPIDER_SPAWN_EGG, null, TowerType.POISON, rectangleOffsets(TowerType.POISON), ""),
+        TOWER_SNOWBALL("スノーボールタワー", BuildKind.TOWER, Material.IRON_GOLEM_SPAWN_EGG, null, TowerType.SNOWBALL, rectangleOffsets(TowerType.SNOWBALL), "");
 
         private final String displayName;
         private final BuildKind kind;
@@ -1791,14 +1947,16 @@ public final class GameFlowController {
         private final Block blockMaterial;
         private final TowerType towerType;
         private final int[][] previewOffsets;
+        private final String description;
 
-        BuildSelection(String displayName, BuildKind kind, Material material, Block blockMaterial, TowerType towerType, int[][] previewOffsets) {
+        BuildSelection(String displayName, BuildKind kind, Material material, Block blockMaterial, TowerType towerType, int[][] previewOffsets, String description) {
             this.displayName = displayName;
             this.kind = kind;
             this.material = material;
             this.blockMaterial = blockMaterial;
             this.towerType = towerType;
             this.previewOffsets = previewOffsets;
+            this.description = description;
         }
 
         public String displayName() {
@@ -1823,6 +1981,10 @@ public final class GameFlowController {
 
         public int[][] previewOffsets() {
             return previewOffsets;
+        }
+
+        public String description() {
+            return description;
         }
 
         public static BuildSelection fromMaterial(Material material) {

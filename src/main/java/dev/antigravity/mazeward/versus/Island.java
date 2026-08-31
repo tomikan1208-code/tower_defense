@@ -109,6 +109,12 @@ public final class Island extends Battlefield {
         owner.loseLife(match.leakDamage());
         broadcast(Component.text(owner.name() + " のライフ -" + match.leakDamage()
                 + "（残り " + owner.lives() + "）", NamedTextColor.RED));
+        rewardSender(enemy);
+        if (enemy.kind().boss()) {
+            // 災厄は消えずに戻る。送られた側は「倒すまで終わらない」ことを知らされる
+            broadcast(Component.text("災厄は出発点へ戻った。倒し切るまで終わらない",
+                    NamedTextColor.DARK_RED));
+        }
         match.onLifeLost(owner);
     }
 
@@ -126,18 +132,54 @@ public final class Island extends Battlefield {
         match.onLifeLost(owner);
     }
 
+    /**
+     * 通した送り主にライフを 1 返す。上限は超えない。
+     *
+     * <p>送りが「相手を削るだけ」だと、削られた側は守りを固める以外に戻す手が無い。
+     * 通ったぶんだけ自分も戻せるようにすることで、
+     * <b>攻めることが立て直しにもなる</b>。上限を超えないので、
+     * 一度も漏らしていない側が送りだけで太ることはない。</p>
+     */
+    private void rewardSender(EnemyInstance enemy) {
+        if (!(enemy.source() instanceof VersusPlayer sender) || sender == owner || !sender.alive()) {
+            return;
+        }
+        if (!sender.gainLife(1)) {
+            return;
+        }
+        match.announce(Component.text(sender.name() + " の送りがコアに届いた  ライフ +1（"
+                + sender.lives() + "/" + sender.maxLives() + "）", NamedTextColor.GREEN));
+    }
+
     // ================================================================ 送りの受け取り
 
-    /** 送られてきたモンスターをこの島に 1 体湧かせる。 */
-    public void receive(AttackerKind kind) {
+    /**
+     * 送られてきたモンスターをこの島に 1 体湧かせる。
+     *
+     * <p>送り主を敵に持たせておく。コアまで通ったときに
+     * <b>送った側のライフが 1 戻る</b> ので、誰の送りだったかが分からないと精算できない。</p>
+     */
+    public void receive(AttackerKind kind, VersusPlayer sender) {
         int spawn = grid.spawns().isEmpty() ? 0 : nextSpawn++ % grid.spawns().size();
-        spawnEnemy(kind.body(), spawn, kind.hp(), kind.killReward());
+        EnemyInstance enemy = spawnEnemy(kind.body(), spawn, kind.hp(), kind.killReward());
+        if (enemy != null) {
+            enemy.source(sender);
+        }
     }
 
     /** 毎 tick。ウェーブがないので、ひたすら戦闘と描画を回すだけ。 */
     public void tick() {
+        tick(true);
+    }
+
+    /**
+     * @param render 経路の表示を更新するか。倍速の途中経過では描かない
+     */
+    public void tick(boolean render) {
         tickBattle();
-        tickPathDisplay();
+        if (render) {
+            tickPathDisplay();
+        }
     }
 
     /**

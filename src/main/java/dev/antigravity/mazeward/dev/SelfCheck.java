@@ -881,10 +881,53 @@ public final class SelfCheck {
         System.out.printf("  能力持ち %d 種 / 呪詛 +%.0f%% > 庇護 -%.0f%% / 送還 %.0f 秒に 1 度%n",
                 withTrait, curse * 100, ward * 100, banishCooldown / 20.0);
 
+        printEnemyTable();
         checkDamagePipeline();
         checkRevive();
         checkPushBack();
         checkBlink();
+        checkCalamityLoop();
+    }
+
+    /**
+     * 敵の耐力・速度・装甲・能力を 1 枚の表にして出す。
+     *
+     * <p>数字を触ったあと「速度だけ突出した敵ができていないか」「装甲が横並びになっていないか」を
+     * 目で見て確かめられるようにするための表。値を持っているのは enum なので、
+     * ここが自動的に最新になる。</p>
+     */
+    private static void printEnemyTable() {
+        System.out.println("  敵一覧（耐力は第1層ウェーブ1・速度はブロック/秒）");
+        for (EnemyKind kind : EnemyKind.values()) {
+            System.out.printf("    %-5s 耐力 %6.0f  速度 %4.1f  装甲 %2.0f  %s%n",
+                    kind.displayName(), kind.baseHp(), kind.speedPerSecond(), kind.armor(),
+                    kind.abilitySummary());
+        }
+    }
+
+    /**
+     * 災厄はコアに触れても消えず、出発点へ戻る。
+     *
+     * <p>戻るときに全快させないことも一緒に確かめる。全快させてしまうと
+     * 削った時間がまるごと無駄になり、「倒す」という選択肢が消える。</p>
+     */
+    private static void checkCalamityLoop() {
+        assertTrue(EnemyKind.BOSS.boss(), "災厄がボス扱いになっていない");
+
+        EnemyInstance calamity = fresh(EnemyKind.BOSS);
+        calamity.advanceTo(1000);
+        calamity.tick();
+        assertTrue(calamity.leaked(), "災厄がコアに到達しても漏れ扱いになっていない");
+
+        calamity.damageDirect(1000);
+        double hpBefore = calamity.hp();
+        calamity.returnToStart();
+        assertTrue(!calamity.leaked(), "災厄が戻ったのに漏れ扱いのまま");
+        assertTrue(calamity.travelled() == 0.0, "災厄が出発点に戻っていない");
+        assertTrue(Math.abs(calamity.hp() - hpBefore) < 1e-6, "災厄が戻るときに全快している");
+
+        System.out.printf("  災厄: 耐力 %.0f（第7層で約 %.0f）／コア到達で出発点へ戻る%n",
+                EnemyKind.BOSS.baseHp(), EnemyKind.BOSS.hpAt(7, 8, 1.15));
     }
 
     /**

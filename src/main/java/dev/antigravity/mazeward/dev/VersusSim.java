@@ -44,6 +44,8 @@ public final class VersusSim {
         MinecraftServer.init();
         int playerCount = args.length > 0 ? Integer.parseInt(args[0]) : 4;
 
+        checkSenderReward();
+
         for (int trial = 0; trial < 2; trial++) {
             simulate(playerCount, 900 + trial * 77L);
             System.out.println();
@@ -253,6 +255,37 @@ public final class VersusSim {
         if (stolen > 0) {
             System.out.println("  終焉騎に奪われたライフ上限: 合計 " + stolen);
         }
+    }
+
+    /**
+     * 送りが通ったときのライフ +1 は、上限を超えない。
+     *
+     * <p>上限を超えられると、守りを固めたまま送り続けるだけで無敵になる。
+     * 「削られたぶんを攻めで取り返す」ところまでが狙いなので、ここは必ず頭打ちにする。</p>
+     */
+    private static void checkSenderReward() {
+        VersusPlayer sender = new VersusPlayer("送り主", null, true);
+        int max = sender.maxLives();
+
+        check(!sender.gainLife(1), "満タンなのにライフが増えた");
+        check(sender.lives() == max, "満タンからライフが動いた: " + sender.lives());
+
+        sender.loseLife(2);
+        check(sender.gainLife(1), "削られているのにライフが戻らない");
+        check(sender.lives() == max - 1, "戻り幅が 1 ではない: " + sender.lives());
+
+        sender.gainLife(1);
+        check(sender.lives() == max, "上限まで戻らない: " + sender.lives());
+        check(!sender.gainLife(1), "上限を超えて戻った: " + sender.lives());
+
+        // 上限を奪われたあとは、その低い上限が頭打ちになる
+        sender.stealMaxLife(1);
+        check(sender.lives() == max - 1, "上限を奪われたのに現在ライフが下がっていない");
+        check(!sender.gainLife(1), "奪われた上限を超えて戻った: " + sender.lives());
+
+        System.out.println("  送りがコアに届いたときのライフ +1: 上限 " + sender.maxLives()
+                + " を超えない");
+        System.out.println();
     }
 
     /** 送れるもののうち、いちばん高いものを送る（インカムを伸ばす動き）。 */

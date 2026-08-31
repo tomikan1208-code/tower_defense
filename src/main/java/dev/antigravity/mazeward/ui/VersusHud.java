@@ -1,5 +1,6 @@
 package dev.antigravity.mazeward.ui;
 
+import dev.antigravity.mazeward.enemy.EnemyKind;
 import dev.antigravity.mazeward.versus.AttackerKind;
 import dev.antigravity.mazeward.versus.Island;
 import dev.antigravity.mazeward.versus.VersusMatch;
@@ -58,7 +59,9 @@ public final class VersusHud {
         set(sidebar, "l1", Component.text("ライフ " + self.lives() + "/" + self.maxLives(),
                 self.lives() > 6 ? NamedTextColor.GREEN : NamedTextColor.RED));
         set(sidebar, "l2", Component.text("コイン " + self.coins(), NamedTextColor.GOLD));
-        set(sidebar, "l3", Component.text("インカム " + self.income() + " /10秒", NamedTextColor.YELLOW));
+        // 収入間隔は人数で変わるので、秒数も試合から取って表示する
+        set(sidebar, "l3", Component.text(
+                "インカム " + self.income() + " /" + match.incomeSeconds() + "秒", NamedTextColor.YELLOW));
         set(sidebar, "l4", Component.text("ストック " + self.stock() + "/" + VersusPlayer.MAX_STOCK,
                 NamedTextColor.AQUA));
         set(sidebar, "l5", Component.text("タワー " + towerCount + "/" + Island.MAX_TOWERS,
@@ -156,14 +159,34 @@ public final class VersusHud {
 
     private static ItemStack sendIcon(AttackerKind kind, VersusPlayer self, VersusMatch match) {
         boolean unlocked = self.income() >= kind.unlockIncome();
+        EnemyKind body = kind.body();
         List<Component> lore = new ArrayList<>();
         lore.add(Component.text(kind.description(), NamedTextColor.GRAY));
+        lore.add(Component.empty());
+
+        // 耐力と速度は必ず出す。何秒で通路を抜けるのかが読めないと、
+        // 「どの塔で受けるか」も「何を送るか」も勘で決めることになる
+        lore.add(Component.text(String.format("耐力 %.0f  速度 %.1f ブロック/秒  装甲 %.0f",
+                kind.hp(), body.speedPerSecond(), body.armor()), NamedTextColor.AQUA));
+        if (body.flying()) {
+            lore.add(Component.text("飛行：迷路を無視して直線で飛ぶ", NamedTextColor.AQUA));
+        }
+        if (body.slowResist() > 0) {
+            lore.add(Component.text(String.format("減速耐性 %.0f%%", body.slowResist() * 100),
+                    NamedTextColor.AQUA));
+        }
+        String ability = body.abilitySummary();
+        if (!ability.isEmpty()) {
+            lore.add(Component.text("能力：" + ability, NamedTextColor.LIGHT_PURPLE));
+        }
         lore.add(Component.empty());
         lore.add(Component.text("コイン " + kind.cost() + "  ストック " + kind.stockCost(),
                 self.coins() >= kind.cost() ? NamedTextColor.GREEN : NamedTextColor.RED));
         lore.add(kind.incomeGain() > 0
                 ? Component.text("インカム +" + kind.incomeGain(), NamedTextColor.YELLOW)
                 : Component.text("インカムは増えない（削り切る用）", NamedTextColor.DARK_RED));
+        lore.add(Component.text("相手のコアに届くと自分のライフ +1（上限まで）",
+                NamedTextColor.DARK_GREEN));
         if (!unlocked) {
             lore.add(Component.empty());
             lore.add(Component.text("インカム " + kind.unlockIncome() + " で解禁",

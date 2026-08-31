@@ -7,25 +7,25 @@ public enum EnemyType {
      * 通常敵：バランスの取れた敵
      * HP: 中程度、速度: 標準
      */
-    NORMAL("通常敵", EntityType.ZOMBIE, 1.0, 1.0, 3, 1),
+    NORMAL("通常敵", EntityType.ZOMBIE, 1.0, 1.0, 3, 1, 1),
 
     /**
      * 早い敵：高速だが脆い
      * HP: 低い、速度: 高速
      */
-    FAST("早い敵", EntityType.RABBIT, 0.65, 1.6, 2, 2),
+    FAST("早い敵", EntityType.RABBIT, 0.65, 1.6, 2, 2, 1),
 
     /**
      * 装甲敵：耐久性が高い
      * HP: 高い、速度: 遅い
      */
-    ARMORED("装甲敵", EntityType.IRON_GOLEM, 2.5, 0.5, 5, 3),
+    ARMORED("装甲敵", EntityType.IRON_GOLEM, 2.5, 0.5, 5, 3, 2),
 
     /**
      * ボス敵：非常に強力
      * HP: 極めて高い、速度: 中程度
      */
-    BOSS("ボス敵", EntityType.WITHER, 5.0, 0.7, 20, 10);
+    BOSS("ボス敵", EntityType.WITHER, 5.0, 0.7, 20, 10, 4);
 
     private final String displayName;
     private final EntityType entityType;
@@ -33,6 +33,7 @@ public enum EnemyType {
     private final double speedMultiplier;
     private final int baseGoldReward;
     private final int spawnWeight;
+    private final int coreDamage;
 
     EnemyType(
             String displayName,
@@ -40,7 +41,8 @@ public enum EnemyType {
             double hpMultiplier,
             double speedMultiplier,
             int baseGoldReward,
-            int spawnWeight
+            int spawnWeight,
+            int coreDamage
     ) {
         this.displayName = displayName;
         this.entityType = entityType;
@@ -48,6 +50,7 @@ public enum EnemyType {
         this.speedMultiplier = speedMultiplier;
         this.baseGoldReward = baseGoldReward;
         this.spawnWeight = spawnWeight;
+        this.coreDamage = coreDamage;
     }
 
     public String displayName() {
@@ -72,6 +75,10 @@ public enum EnemyType {
 
     public int spawnWeight() {
         return spawnWeight;
+    }
+
+    public int coreDamage() {
+        return coreDamage;
     }
 
     /**
@@ -100,7 +107,7 @@ public enum EnemyType {
      * - Layer: 各層で+9% (1.09倍)
      */
     public double calculateSpeed(int wave, int layer) {
-        double base = 0.03 * speedMultiplier;
+        double base = 0.06 * speedMultiplier;
         double waveScaling = Math.pow(1.07, wave - 1);
         double layerScaling = Math.pow(1.09, layer - 1);
         return base * waveScaling * layerScaling;

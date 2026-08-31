@@ -1,0 +1,16 @@
+# MAZEWARD VERSUS 学習環境
+#
+# torch は環境ごとに正しいビルドが違う（CUDA / CPU）。ここではバージョンだけ
+# 指定して、CUDA 版が要る場合は PyTorch の公式インデックスから入れること:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+numpy>=1.26
+torch>=2.1
+flask>=3.0
+
+# 任意: ダッシュボードをネイティブウィンドウで開く（無ければ Chrome/Edge の
+# アプリモードに自動で落ちるので必須ではない）
+# pywebview>=5.0
+
+# 任意: Colab の学習ログをローカルへ取り込む場合のみ
+# google-api-python-client>=2.100
+# google-auth-oauthlib>=1.2

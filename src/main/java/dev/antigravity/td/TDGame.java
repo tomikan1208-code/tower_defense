@@ -4,23 +4,37 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.coordinate.Point;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.EntityType;
 import net.minestom.server.entity.Player;
+import net.minestom.server.entity.metadata.display.TextDisplayMeta;
 import net.minestom.server.instance.InstanceContainer;
 
 public final class TDGame {
+    private static final int BASE_ENEMIES_PER_WAVE = 14;
+    private static final int BASE_SPAWN_INTERVAL_TICKS = 20;
+    private static final int SUPPORT_BLOCK_Y = 51;
+
     private final InstanceContainer instance;
     private final List<Point> path;
     private final List<EnemyUnit> enemies = new ArrayList<>();
     private final List<Tower> towers = new ArrayList<>();
     private final List<Projectile> projectiles = new ArrayList<>();
+    private final List<FloatingDamageText> floatingDamageTexts = new ArrayList<>();
     private final int layerNumber;
+        private final BossBar enemyBossBar = BossBar.bossBar(
+            Component.text("敵残数: 0/0", NamedTextColor.RED),
+            0.0f,
+            BossBar.Color.RED,
+            BossBar.Overlay.PROGRESS
+        );
 
     private int tickCounter = 0;
     private int wave = 0;
@@ -47,11 +61,13 @@ public final class TDGame {
             return;
         }
         wave++;
-        enemiesToSpawn = 8 + wave * 2;
+        int enemiesThisWave = enemiesPerWave();
+        enemiesToSpawn = enemiesThisWave;
         nextSpawnTick = tickCounter;
         waveRewardGranted = false;
         waveClearPending = false;
-        broadcast("Wave " + wave + " 開始");
+        updateBossBar(enemiesThisWave, enemiesThisWave);
+        broadcast("Wave " + wave + " 開始 (敵 " + enemiesThisWave + " 体, 出現間隔 " + spawnIntervalTicks() + "tick)");
     }
 
     public boolean consumeWaveCleared() {
@@ -62,30 +78,43 @@ public final class TDGame {
         return true;
     }
 
+    public boolean isWaveIdle() {
+        return enemiesToSpawn == 0 && enemies.isEmpty();
+    }
+
     public void tryPlaceTower(Player player, String towerTypeToken) {
         Pos p = player.getPosition();
         int originX = (int) Math.floor(p.x());
         int originZ = (int) Math.floor(p.z());
-        int baseY = Math.max(1, (int) Math.floor(p.y()));
-        tryPlaceTowerAt(player, towerTypeToken, originX, originZ, baseY);
+        tryPlaceTowerAt(player, towerTypeToken, originX, originZ, SUPPORT_BLOCK_Y + 1);
     }
 
-    public void tryPlaceTowerAt(Player player, String towerTypeToken, int originX, int originZ, int baseY) {
+    public boolean tryPlaceTowerAt(Player player, String towerTypeToken, int originX, int originZ, int baseY) {
         TowerType towerType = TowerType.fromToken(towerTypeToken);
         if (towerType == null) {
             player.sendMessage(Component.text("不明な塔タイプです: " + towerTypeToken));
             player.sendMessage(Component.text("使用可能: " + TowerType.usageKeys()));
-            return;
+            return false;
         }
 
         if (playerGold < towerType.cost()) {
             player.sendMessage(Component.text("ゴールド不足: " + playerGold + "/" + towerType.cost()));
-            return;
+            return false;
+        }
+
+        if (baseY != SUPPORT_BLOCK_Y + 1) {
+            player.sendMessage(Component.text("設置不可: y51 のブロックの上にのみ設置できます"));
+            return false;
         }
 
         if (isTooCloseToPath(originX, originZ, towerType) || hasTowerOverlap(originX, originZ, towerType)) {
             player.sendMessage(Component.text("設置不可: 道沿いか、既存塔と重複しています"));
-            return;
+            return false;
+        }
+
+        if (!hasSupportBlocks(originX, originZ, baseY, towerType)) {
+            player.sendMessage(Component.text("設置不可: ブロックの上に設置してください"));
+            return false;
         }
 
         playerGold -= towerType.cost();
@@ -94,6 +123,52 @@ public final class TDGame {
         Pos center = footprintCenter(originX, baseY, originZ, towerType);
         towers.add(new Tower(towerType, center, originX, originZ, visuals));
         broadcast(towerType.displayName() + " を設置。残りGold: " + playerGold);
+        return true;
+    }
+
+    public Tower findTowerAt(int x, int z) {
+        for (Tower tower : towers) {
+            int minX = tower.originX();
+            int minZ = tower.originZ();
+            int maxX = tower.originX() + tower.type().sizeX() - 1;
+            int maxZ = tower.originZ() + tower.type().sizeZ() - 1;
+            if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
+                return tower;
+            }
+        }
+        return null;
+    }
+
+    public Tower findTowerByVisual(Entity target) {
+        for (Tower tower : towers) {
+            for (Entity visual : tower.visuals()) {
+                if (visual == target) {
+                    return tower;
+                }
+            }
+        }
+        return null;
+    }
+
+    public boolean tryUpgradeTower(Player player, Tower tower) {
+        if (tower == null) {
+            return false;
+        }
+        if (!tower.canUpgrade()) {
+            player.sendMessage(Component.text("このタワーは最大レベルです"));
+            return false;
+        }
+
+        int cost = tower.upgradeCost();
+        if (playerGold < cost) {
+            player.sendMessage(Component.text("強化に必要なゴールドが不足しています: " + playerGold + "/" + cost));
+            return false;
+        }
+
+        playerGold -= cost;
+        tower.upgrade();
+        broadcast(tower.type().displayName() + " をLv" + tower.level() + " に強化しました（-" + cost + "G）");
+        return true;
     }
 
     public void tick() {
@@ -102,12 +177,14 @@ public final class TDGame {
         if (enemiesToSpawn > 0 && tickCounter >= nextSpawnTick) {
             spawnEnemy();
             enemiesToSpawn--;
-            nextSpawnTick = tickCounter + 20;
+            nextSpawnTick = tickCounter + spawnIntervalTicks();
         }
 
         updateEnemies();
         updateTowers();
         updateProjectiles();
+        updateDamageTexts();
+        updateBossBar(Math.max(1, enemiesPerWave()), enemiesToSpawn + enemies.size());
         updateBattleUi();
 
         if (baseHp <= 0) {
@@ -174,6 +251,17 @@ public final class TDGame {
 
         EnemyUnit enemy = new EnemyUnit(body, path, selectedType, maxHp, speed, goldReward);
         enemies.add(enemy);
+        updateBossBar(Math.max(1, enemiesPerWave()), enemiesToSpawn + enemies.size());
+    }
+
+    private int enemiesPerWave() {
+        int scaled = BASE_ENEMIES_PER_WAVE + wave * 2 + (layerNumber - 1);
+        return Math.max(10, Math.min(scaled, 42));
+    }
+
+    private int spawnIntervalTicks() {
+        int reduced = BASE_SPAWN_INTERVAL_TICKS - wave / 2;
+        return Math.max(8, reduced);
     }
 
     /**
@@ -261,6 +349,7 @@ public final class TDGame {
                     .append(Component.text(" +" + enemy.goldReward() + "G", NamedTextColor.YELLOW))
                     .build();
                 broadcastComponent(msg);
+                updateBossBar(Math.max(1, enemiesPerWave()), enemiesToSpawn + enemies.size());
                 continue;
             }
 
@@ -270,7 +359,13 @@ public final class TDGame {
             if (enemy.reachedGoal()) {
                 enemy.body().remove();
                 it.remove();
-                baseHp--;
+                int coreDamage = enemy.type().coreDamage();
+                baseHp -= coreDamage;
+                if (baseHp < 0) {
+                    baseHp = 0;
+                }
+                broadcast(enemy.type().displayName() + " がコアに到達 (" + coreDamage + " ダメージ)");
+                updateBossBar(Math.max(1, enemiesPerWave()), enemiesToSpawn + enemies.size());
             }
         }
 
@@ -304,7 +399,7 @@ public final class TDGame {
 
             if (target != null) {
                 // 発射体を生成してターゲット
-                projectiles.add(new Projectile(tower, target, tower.type()));
+                projectiles.add(new Projectile(instance, tower, target, tower.type()));
                 tower.fire();
             }
         }
@@ -315,7 +410,54 @@ public final class TDGame {
         while (iter.hasNext()) {
             Projectile proj = iter.next();
             proj.tick();
+            Projectile.HitEvent hit = proj.consumeHitEvent();
+            if (hit != null) {
+                spawnDamageText(hit);
+            }
             if (!proj.isAlive()) {
+                iter.remove();
+            }
+        }
+    }
+
+    private void spawnDamageText(Projectile.HitEvent hit) {
+        Entity display = new Entity(EntityType.TEXT_DISPLAY);
+        display.setNoGravity(true);
+        Pos at = hit.position().withY(hit.position().y() + 0.9);
+        display.setInstance(instance, at);
+        display.editEntityMeta(TextDisplayMeta.class, meta -> {
+            meta.setText(Component.text(
+                "-" + String.format("%.1f", hit.damage()),
+                TextColor.color(
+                    (int) (hit.color().r * 255),
+                    (int) (hit.color().g * 255),
+                    (int) (hit.color().b * 255)
+                )));
+            meta.setUseDefaultBackground(false);
+            meta.setBackgroundColor(0x00000000);
+            meta.setTextOpacity((byte) 255);
+            meta.setShadow(false);
+            meta.setSeeThrough(true);
+            meta.setLineWidth(200);
+            meta.setAlignment(TextDisplayMeta.Alignment.CENTER);
+        });
+        floatingDamageTexts.add(new FloatingDamageText(display, 12));
+    }
+
+    private void updateDamageTexts() {
+        Iterator<FloatingDamageText> iter = floatingDamageTexts.iterator();
+        while (iter.hasNext()) {
+            FloatingDamageText text = iter.next();
+            if (text.entity().isRemoved()) {
+                iter.remove();
+                continue;
+            }
+
+            Pos pos = text.entity().getPosition();
+            text.entity().teleport(pos.withY(pos.y() + 0.03));
+            text.decrement();
+            if (text.ticksRemaining() <= 0) {
+                text.entity().remove();
                 iter.remove();
             }
         }
@@ -357,6 +499,25 @@ public final class TDGame {
         return false;
     }
 
+    private boolean hasSupportBlocks(int originX, int originZ, int baseY, TowerType towerType) {
+        if (baseY != SUPPORT_BLOCK_Y + 1) {
+            return false;
+        }
+        for (int dx = 0; dx < towerType.sizeX(); dx++) {
+            for (int dz = 0; dz < towerType.sizeZ(); dz++) {
+                int x = originX + dx;
+                int z = originZ + dz;
+                if (instance.getBlock(x, baseY, z) != net.minestom.server.instance.block.Block.AIR) {
+                    return false;
+                }
+                if (instance.getBlock(x, SUPPORT_BLOCK_Y, z) == net.minestom.server.instance.block.Block.AIR) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private Pos footprintCenter(int originX, int baseY, int originZ, TowerType towerType) {
         double cx = originX + towerType.sizeX() / 2.0;
         double cz = originZ + towerType.sizeZ() / 2.0;
@@ -374,7 +535,7 @@ public final class TDGame {
                 Pos mobPos = new Pos(originX + dx + 0.5, baseY + yOffset, originZ + dz + 0.5);
                 entity.setInstance(instance, mobPos);
                 entity.setCustomName(Component.text(towerType.displayName()));
-                entity.setCustomNameVisible(false);
+                entity.setCustomNameVisible(true);
                 tryApplyVisualScale(entity, towerType.visualScale());
                 visuals.add(entity);
             }
@@ -434,10 +595,23 @@ public final class TDGame {
         }
         towers.clear();
 
+        for (Projectile projectile : projectiles) {
+            projectile.dispose();
+        }
+        projectiles.clear();
+
+        for (FloatingDamageText text : floatingDamageTexts) {
+            if (!text.entity().isRemoved()) {
+                text.entity().remove();
+            }
+        }
+        floatingDamageTexts.clear();
+
         enemiesToSpawn = 0;
         baseHp = 20;
         playerGold = 50;
         wave = 0;
+        hideBossBar();
     }
 
     private void updateBattleUi() {
@@ -446,7 +620,7 @@ public final class TDGame {
         }
 
         Component ui = Component.text()
-                .append(Component.text("タワーHP: ", NamedTextColor.GOLD))
+            .append(Component.text("コアHP: ", NamedTextColor.GOLD))
                 .append(Component.text(baseHp, NamedTextColor.RED))
                 .append(Component.text("  |  ", NamedTextColor.DARK_GRAY))
                 .append(Component.text("所持金: ", NamedTextColor.GOLD))
@@ -474,7 +648,53 @@ public final class TDGame {
                 .append(component)
                 .build();
         for (Player p : MinecraftServer.getConnectionManager().getOnlinePlayers()) {
-            p.sendMessage(text);
+            if (p.getInstance() == instance) {
+                p.sendMessage(text);
+            }
+        }
+    }
+
+    private void updateBossBar(int totalEnemiesThisWave, int remainingEnemies) {
+        int total = Math.max(1, totalEnemiesThisWave);
+        int remaining = Math.max(0, remainingEnemies);
+        float progress = Math.max(0.0f, Math.min(1.0f, (float) remaining / (float) total));
+        enemyBossBar.name(Component.text("敵残数: " + remaining + " / " + total + "  Wave " + wave, NamedTextColor.RED));
+        enemyBossBar.progress(progress);
+
+        for (Player player : MinecraftServer.getConnectionManager().getOnlinePlayers()) {
+            if (player.getInstance() == instance) {
+                player.showBossBar(enemyBossBar);
+            } else {
+                player.hideBossBar(enemyBossBar);
+            }
+        }
+    }
+
+    private void hideBossBar() {
+        for (Player player : MinecraftServer.getConnectionManager().getOnlinePlayers()) {
+            player.hideBossBar(enemyBossBar);
+        }
+    }
+
+    private static final class FloatingDamageText {
+        private final Entity entity;
+        private int ticksRemaining;
+
+        private FloatingDamageText(Entity entity, int ticksRemaining) {
+            this.entity = entity;
+            this.ticksRemaining = ticksRemaining;
+        }
+
+        private Entity entity() {
+            return entity;
+        }
+
+        private int ticksRemaining() {
+            return ticksRemaining;
+        }
+
+        private void decrement() {
+            ticksRemaining--;
         }
     }
 }

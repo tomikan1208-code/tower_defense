@@ -32,8 +32,15 @@ public enum EnemyKind {
     HEALER("祈祷師", EntityType.EVOKER, MoveMode.GROUND,
             70, 0.045, 2, 18, 2, 0.0, 6.0, NamedTextColor.GOLD),
 
+    /**
+     * コアに触れても消えず、出発点へ戻って何周でも来る。
+     *
+     * <p>「漏らしてでもやり過ごす」が通らない唯一の敵。逃げ切れない代わりに、
+     * 一撃で負けはしない厚さにしてある。周回のたびにコアが削れるので、
+     * <b>削り切れる火力があるかどうか</b> だけを問う。</p>
+     */
     BOSS("災厄", EntityType.RAVAGER, MoveMode.GROUND,
-            1400, 0.032, 8, 200, 10, 0.85, 0.0, NamedTextColor.DARK_RED),
+            4200, 0.032, 8, 200, 10, 0.85, 0.0, NamedTextColor.DARK_RED),
 
     // ---------------------------------------------------------------- 能力持ち
 
@@ -42,10 +49,13 @@ public enum EnemyKind {
             56, 0.062, 1, 11, 1, 0.0, 0.0, NamedTextColor.DARK_GREEN,
             Trait.sapper(3.5, 40)),
 
-    /** 被弾すると経路の先へ飛ぶ。1 点集中のキルゾーンを飛び越える。 */
+    /**
+     * 被弾すると半径 5.0 の中で最もコア寄りの経路へ跳ぶ。壁は無視して跨ぐ。
+     * 1 点集中のキルゾーンも、折り返しを詰め込んだ迷路も、まとめて飛び越える。
+     */
     BLINKER("瞬移体", EntityType.ENDERMAN, MoveMode.GROUND,
             74, 0.058, 0, 13, 2, 0.4, 0.0, NamedTextColor.LIGHT_PURPLE,
-            Trait.blink(3.5, 45)),
+            Trait.blink(5.0, 45)),
 
     /** 周囲の味方の被ダメージを 35% 減らす。数字を並べるだけでは溶けなくなる。 */
     AEGIS("庇護者", EntityType.PIGLIN_BRUTE, MoveMode.GROUND,
@@ -56,6 +66,16 @@ public enum EnemyKind {
     SPLITTER("分裂体", EntityType.SLIME, MoveMode.GROUND,
             96, 0.050, 2, 10, 2, 0.0, 0.0, NamedTextColor.GREEN,
             Trait.split(2)),
+
+    /**
+     * 分裂体が割れて出てくる小さいスライム。
+     *
+     * <p>親と同じスライムのまま一回り小さくすることで、
+     * 「割れた」ことが見た目だけで伝わる。HP と報酬は親から渡されるので、
+     * ここの素の値は単体で出したときの目安でしかない。</p>
+     */
+    SPLITLING("分裂片", EntityType.SLIME, MoveMode.GROUND,
+            28, 0.068, 0, 4, 1, 0.0, 0.0, NamedTextColor.GREEN),
 
     /** 燃えず、減速も効かない。炎と氷に寄せた構成を咎める。 */
     EMBERLING("熱塊", EntityType.BLAZE, MoveMode.GROUND,
@@ -159,8 +179,59 @@ public enum EnemyKind {
         return this == BOSS;
     }
 
+    /**
+     * スライムの見た目の大きさ。0 ならスライムではない。
+     *
+     * <p>分裂体は中くらい、分裂片は小さいスライムにして、
+     * 割れた前後が同じ生き物だと一目で分かるようにしている。</p>
+     */
+    public int slimeSize() {
+        return switch (this) {
+            case SPLITTER -> 2;
+            case SPLITLING -> 1;
+            default -> 0;
+        };
+    }
+
     public TextColor color() {
         return color;
+    }
+
+    /** 表示用の速度（ブロック / 秒）。内部は tick 単位なので、そのままでは読めない。 */
+    public double speedPerSecond() {
+        return baseSpeed * 20.0;
+    }
+
+    /** 層 1・ウェーブ 1 での耐力。表示用の基準値。 */
+    public double baseHp() {
+        return baseHp;
+    }
+
+    /** 名札に出す短い能力表示。持たない敵は空文字。 */
+    public String abilityTag() {
+        if (healer()) {
+            return String.format("回復%.0f/秒", healPerSecond);
+        }
+        if (boss()) {
+            return "周回";
+        }
+        return trait.tag();
+    }
+
+    /**
+     * 能力の説明文。持たない敵は空文字。
+     *
+     * <p>{@link Trait} に無い「回復」「災厄の周回」もここでまとめて言葉にする。
+     * プレイヤーから見れば、どれも同じ「この敵は何をするのか」でしかない。</p>
+     */
+    public String abilitySummary() {
+        if (healer()) {
+            return String.format("周囲の味方を毎秒 %.0f 回復する", healPerSecond);
+        }
+        if (boss()) {
+            return "コアに触れても消えず、出発点へ戻って何周でもやり直す";
+        }
+        return trait.summary();
     }
 
     /** 層とウェーブに応じた最大 HP。 */

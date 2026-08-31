@@ -128,6 +128,11 @@ public final class Stage extends Battlefield {
         run.damageCore(enemy.kind().leakDamage());
         broadcast(Component.text(enemy.kind().displayName() + " がコアに到達  コアHP -"
                 + enemy.kind().leakDamage() + " (残り " + run.coreHp() + ")", NamedTextColor.RED));
+        if (enemy.kind().boss()) {
+            // 消えずに戻ってくることを言っておかないと「倒せなかった」と誤解される
+            broadcast(Component.text("災厄は出発点へ戻った。倒し切るまで終わらない",
+                    NamedTextColor.DARK_RED));
+        }
         if (run.coreDestroyed()) {
             finish(false);
         }

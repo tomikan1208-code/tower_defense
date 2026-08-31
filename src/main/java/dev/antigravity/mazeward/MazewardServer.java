@@ -17,6 +17,8 @@ import net.minestom.server.event.player.PlayerDisconnectEvent;
 import net.minestom.server.event.player.PlayerHandAnimationEvent;
 import net.minestom.server.event.player.PlayerSpawnEvent;
 import net.minestom.server.event.player.PlayerUseItemEvent;
+import net.minestom.server.event.server.ServerListPingEvent;
+import net.minestom.server.ping.Status;
 import net.minestom.server.timer.TaskSchedule;
 
 /** Minestom の初期化とイベント配線だけを持つ薄い層。 */
@@ -24,6 +26,9 @@ public final class MazewardServer {
 
     private static final String HOST = "0.0.0.0";
     private static final int PORT = 25565;
+
+    /** サーバー一覧に出す最大人数。Minestom は人数制限をしないので表示上の枠。 */
+    private static final int MAX_PLAYERS = 20;
 
     private final MinecraftServer server;
     private final Mazeward game;
@@ -47,6 +52,14 @@ public final class MazewardServer {
 
     private void registerEvents() {
         GlobalEventHandler events = MinecraftServer.getGlobalEventHandler();
+
+        // 既定では最大人数が「接続中 + 1」になり /1 と表示されるので、固定枠を返す。
+        events.addListener(ServerListPingEvent.class, event -> {
+            Status.PlayerInfo players = Status.PlayerInfo.builder(Status.PlayerInfo.online(MAX_PLAYERS))
+                    .maxPlayers(MAX_PLAYERS)
+                    .build();
+            event.setStatus(Status.builder(event.getStatus()).playerInfo(players).build());
+        });
 
         events.addListener(AsyncPlayerConfigurationEvent.class, game::onConfigure);
         events.addListener(PlayerSpawnEvent.class, event -> {

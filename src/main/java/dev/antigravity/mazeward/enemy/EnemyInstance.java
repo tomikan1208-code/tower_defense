@@ -65,6 +65,9 @@ public final class EnemyInstance {
 
     private int revivesLeft;
 
+    /** 対戦で「誰が送った敵か」。シングルでは null。分裂した子にも引き継ぐ。 */
+    private EnemySource source;
+
     // 1 発ごとに数字を出すとエンティティが溢れるので、少しの間ぶんを足し合わせてから出す
     private double pendingDamage;
     private TextColor pendingColor;
@@ -107,6 +110,15 @@ public final class EnemyInstance {
 
     public EnemyKind kind() {
         return kind;
+    }
+
+    /** 送り主。送られた敵でなければ null。 */
+    public EnemySource source() {
+        return source;
+    }
+
+    public void source(EnemySource source) {
+        this.source = source;
     }
 
     /** いま辿っている折れ線。分裂した子に同じ経路を渡すのに使う。 */
@@ -466,9 +478,27 @@ public final class EnemyInstance {
         for (int i = 0; i < 10; i++) {
             bar.append(i < filled ? '|' : '.');
         }
+        // 耐力と速度は常に頭上へ出す。「あと何発で落ちるか」「先回りが間に合うか」は
+        // バーの長さだけでは読めず、置き直しの判断がそのぶん勘になる
         Component name = Component.text(kind.displayName() + " ", kind.color())
+                .append(Component.text(String.format("%.0f/%.0f ", Math.max(0.0, hp), maxHp),
+                        NamedTextColor.WHITE))
+                .append(Component.text(String.format("速%.1f ", kind.speedPerSecond()),
+                        NamedTextColor.GRAY))
                 .append(Component.text(bar.toString(),
                         filled > 5 ? NamedTextColor.GREEN : filled > 2 ? NamedTextColor.YELLOW : NamedTextColor.RED));
+
+        String tag = kind.abilityTag();
+        if (!tag.isEmpty()) {
+            name = name.append(Component.text(" " + tag, NamedTextColor.DARK_AQUA));
+        }
+        // 瞬移だけは「いま跳べるのか」で寄せ方が変わるので、残り時間まで出す
+        if (kind.trait().blinks()) {
+            name = name.append(blinkCooldown > 0
+                    ? Component.text(String.format(" 次の瞬移 %.1f秒", blinkCooldown / 20.0),
+                            NamedTextColor.DARK_GRAY)
+                    : Component.text(" 瞬移可", NamedTextColor.LIGHT_PURPLE));
+        }
         if (slowTicks > 0) {
             name = name.append(Component.text(" ❄", NamedTextColor.AQUA));
         }

@@ -294,7 +294,19 @@ public abstract class Battlefield {
 
     /** 敵・タワー・弾を 1 tick 進める。 */
     protected void tickBattle() {
-        tickEnemies();
+        tickBattle(true);
+    }
+
+    /**
+     * @param render 見せ物（ダメージ数字・燃焼の粒・能力の演出）を出すか。
+     *               倍速で 1 サーバー tick に何度も進めるとき、
+     *               <b>途中の回では出さない</b>。16 倍速で 16 回ぶんの数字を
+     *               同時に浮かべると、entity が数百単位で溜まって
+     *               <b>速くしたのにクライアントが重くなる</b>。
+     *               溜まったダメージは消えず、次に出すときに合算されて出る
+     */
+    protected void tickBattle(boolean render) {
+        tickEnemies(render);
         tickTowers();
         tickShots();
     }
@@ -305,14 +317,16 @@ public abstract class Battlefield {
         }
     }
 
-    private void tickEnemies() {
+    private void tickEnemies(boolean render) {
         List<EnemyInstance> dead = null;
         List<EnemyInstance> leaked = null;
 
         for (EnemyInstance enemy : enemies) {
             enemy.tick();
             enemy.syncBody();
-            showAbilityEffects(enemy);
+            if (render) {
+                showAbilityEffects(enemy);
+            }
 
             if (!enemy.alive()) {
                 (dead == null ? dead = new ArrayList<>() : dead).add(enemy);
@@ -322,10 +336,10 @@ public abstract class Battlefield {
         }
 
         applyFieldRunes();
-        if (tick % BURN_DRAW_INTERVAL == 0) {
+        if (render && tick % BURN_DRAW_INTERVAL == 0) {
             drawBurning();
         }
-        if (tick % DAMAGE_FLUSH_INTERVAL == 0) {
+        if (render && tick % DAMAGE_FLUSH_INTERVAL == 0) {
             flushDamageNumbers();
         }
         if (tick % HEAL_INTERVAL == 0) {
@@ -627,6 +641,9 @@ public abstract class Battlefield {
 
             EnemyInstance child = new EnemyInstance(
                     EnemyKind.SPLITLING, body, parent.waypoints(), hp, reward);
+            // 割れた子も「送られてきた敵」のまま。親だけが送り主を持つと、
+            // 分裂体を送ったときだけコア到達の見返りが消えてしまう
+            child.source(parent.source());
             // 少しずらして出すと重なって 1 体に見えるのを防げる
             child.advanceTo(Math.max(0.0, parent.travelled() - 0.9 * i));
             enemies.add(child);

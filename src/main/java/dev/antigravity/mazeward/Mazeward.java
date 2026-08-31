@@ -1,5 +1,7 @@
 package dev.antigravity.mazeward;
 
+import dev.antigravity.mazeward.ai.AiDirector;
+import dev.antigravity.mazeward.ai.BrainClient;
 import dev.antigravity.mazeward.core.Shape;
 import dev.antigravity.mazeward.core.Shapes;
 import dev.antigravity.mazeward.core.Vec2i;
@@ -13,7 +15,9 @@ import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.ui.Hud;
 import dev.antigravity.mazeward.ui.Menus;
 import dev.antigravity.mazeward.ui.PlayerSession;
+import dev.antigravity.mazeward.ui.SpectatorHud;
 import dev.antigravity.mazeward.ui.VersusHud;
+import dev.antigravity.mazeward.versus.MatchClock;
 import dev.antigravity.mazeward.versus.MirrorBot;
 import dev.antigravity.mazeward.versus.WaitingRoom;
 import dev.antigravity.mazeward.versus.VersusMatch;
@@ -139,6 +143,26 @@ public final class Mazeward implements Stage.Listener {
     private int matchEndedTick = -1;
     private final List<MirrorBot> bots = new ArrayList<>();
 
+    /**
+     * 観戦している人。参加者ではないので島を持たない。
+     *
+     * <p>参加者と同じ入れ物で管理すると「島が無い参加者」という例外が
+     * あちこちに生えるので、最初から別に持つ。</p>
+     */
+    private final Set<UUID> spectators = new LinkedHashSet<>();
+
+    /** 観戦者がいま見ている席。「次の島へ」で回す。 */
+    private final Map<UUID, Integer> watching = new HashMap<>();
+
+    /** 試合の進む速さ。観戦のときだけ動かす。 */
+    private final MatchClock clock = new MatchClock();
+
+    /** 学習済み方策への接続。試合をまたいで生かしておく（読み込みに数秒かかるため）。 */
+    private BrainClient brain;
+
+    /** AI が操作している席をまとめて動かす人。AI 不在の試合では null。 */
+    private AiDirector aiDirector;
+
     private Roadmap.Node activeNode;
     private Stage stage;
     private InstanceContainer stageInstance;
@@ -187,6 +211,8 @@ public final class Mazeward implements Stage.Listener {
             session.leaveStage();
         }
         versusHumans.remove(player.getUuid());
+        spectators.remove(player.getUuid());
+        watching.remove(player.getUuid());
         if (waitingParty.remove(player.getUuid())) {
             refreshWaitingRoom();
         }
@@ -335,13 +361,16 @@ public final class Mazeward implements Stage.Listener {
                 }
                 return;
             }
-            if (player.getHeldSlot() == 1) {
-                player.teleport(WaitingRoom.ENTRY);
-                player.sendMessage(Component.text(
-                        "待機部屋に入りました。人がそろったら緑のアイテムを右クリック",
-                        NamedTextColor.AQUA));
-            } else {
-                startRun(player);
+            switch (player.getHeldSlot()) {
+                case 1 -> {
+                    player.teleport(WaitingRoom.ENTRY);
+                    player.sendMessage(Component.text(
+                            "待機部屋に入りました。人がそろったら緑のアイテムを右クリック",
+                            NamedTextColor.AQUA));
+                }
+                case 2 -> openAiMatchMenu(session);
+                case 3 -> openSpectateMenu(session);
+                default -> startRun(player);
             }
             return;
         }
@@ -473,12 +502,92 @@ public final class Mazeward implements Stage.Listener {
     }
 
     /**
+     * AI と対戦する人数を選ぶ。
+     *
+     * <p>相手はミラーボット（自分の真似）ではなく、
+     * {@code ai/} で学習した方策そのもの。学習が進むほど強くなる。</p>
+     */
+    private void openAiMatchMenu(PlayerSession session) {
+        List<Menus.Option> options = new ArrayList<>();
+        for (int count : new int[] {2, 3, 4, 6, 8}) {
+            int players = count;
+            options.add(new Menus.Option(
+                    Hud.item(Material.DIAMOND_SWORD,
+                            Component.text(players + " 人で対戦", NamedTextColor.RED),
+                            Component.text("あなた + AI " + (players - 1) + " 体",
+                                    NamedTextColor.GRAY),
+                            Component.text("相手は ai/ で学習した方策です",
+                                    NamedTextColor.DARK_GRAY)),
+                    () -> startAiMatch(List.of(session.player()), List.of(), players - 1)));
+        }
+        Menus.openChoice(session, Component.text("AI と対戦する人数"), options, false);
+    }
+
+    /** AI 同士の試合を観る。参加はしない。 */
+    private void openSpectateMenu(PlayerSession session) {
+        List<Menus.Option> options = new ArrayList<>();
+        for (int count : new int[] {2, 4, 6, 8}) {
+            int players = count;
+            options.add(new Menus.Option(
+                    Hud.item(Material.SPYGLASS,
+                            Component.text("AI " + players + " 体の対戦を観る",
+                                    NamedTextColor.LIGHT_PURPLE),
+                            Component.text("速度は一時停止〜16 倍まで変えられます",
+                                    NamedTextColor.GRAY),
+                            Component.text("盤面には触れません", NamedTextColor.DARK_GRAY)),
+                    () -> startAiMatch(List.of(), List.of(session.player()), players)));
+        }
+        Menus.openChoice(session, Component.text("AI 同士の対戦を観戦"), options, false);
+    }
+
+    /**
+     * AI 入りの試合を始める。
+     *
+     * @param humans   参加する人（0 人なら AI 同士の試合になる）
+     * @param watchers 観戦する人。島を持たず、時間だけを操作できる
+     * @param aiCount  AI が持つ島の数
+     */
+    private void startAiMatch(List<Player> humans, List<Player> watchers, int aiCount) {
+        if (brain == null) {
+            brain = BrainClient.openDefault();
+        }
+        // 立っていなければ自分で立てる。「Python を先に起動する」を
+        // 遊ぶ前提にすると、忘れたときに理由の分からない弱い相手が出てくる
+        boolean starting = brain.ensureBrainProcess();
+        startVersus(humans, 0, aiCount, watchers);
+
+        if (starting || !brain.available()) {
+            // 読み込みに数秒かかる。黙って待たせると「AI が弱い」と誤解される
+            List<Player> everyone = new ArrayList<>(humans);
+            everyone.addAll(watchers);
+            for (Player player : everyone) {
+                player.sendMessage(Component.text(
+                        "AI ブリッジを起動しています。数秒後に学習済み方策へ切り替わります"
+                                + "（それまでは貪欲ボットが打ちます）", NamedTextColor.GRAY));
+            }
+        }
+    }
+
+    /**
      * 対戦を始める。
      *
      * @param humans  参加する人。全員がそれぞれ島を 1 つ持つ
      * @param botFill 足りないぶんを埋めるミラーボットの数（デバッグ用。通常は 0）
      */
     private void startVersus(List<Player> humans, int botFill) {
+        startVersus(humans, botFill, 0, List.of());
+    }
+
+    /**
+     * 対戦を始める。
+     *
+     * @param humans   参加する人。全員がそれぞれ島を 1 つ持つ
+     * @param botFill  ミラーボット（人の操作を真似する相手）の数
+     * @param aiCount  学習済み方策が操作する島の数
+     * @param watchers 観戦する人。島を持たず、試合の速度だけを操作できる
+     */
+    private void startVersus(List<Player> humans, int botFill, int aiCount,
+                             List<Player> watchers) {
         cleanupVersus();
 
         versusInstance = MinecraftServer.getInstanceManager()
@@ -488,10 +597,11 @@ public final class Mazeward implements Stage.Listener {
         versusInstance.setTime(6000);
         versusInstance.setTimeRate(0);
 
-        int playerCount = humans.size() + botFill;
+        int playerCount = humans.size() + botFill + aiCount;
         long seed = new Random().nextLong();
         versus = new VersusMatch(versusInstance, seed, playerCount, this::onMatchEnded);
         matchEndedTick = -1;
+        clock.reset();
 
         for (Player human : humans) {
             VersusPlayer participant = new VersusPlayer(human.getUsername(), human, false);
@@ -503,6 +613,22 @@ public final class Mazeward implements Stage.Listener {
             versus.addParticipant(bot);
             // 遅延をずらす。全員が同時に同じ手を打つと送りが一斉に来て事故になる
             bots.add(new MirrorBot(bot, 20 + i * 25));
+        }
+        List<Integer> aiSeats = new ArrayList<>();
+        for (int i = 1; i <= aiCount; i++) {
+            VersusPlayer ai = new VersusPlayer("AI-" + i, null, true);
+            aiSeats.add(versus.participants().size());
+            versus.addParticipant(ai);
+        }
+        if (!aiSeats.isEmpty()) {
+            aiDirector = new AiDirector(versus, brain);
+            for (int seat : aiSeats) {
+                aiDirector.control(seat);
+            }
+        }
+
+        for (Player watcher : watchers) {
+            enterAsSpectator(watcher);
         }
 
         for (Player human : humans) {
@@ -527,13 +653,151 @@ public final class Mazeward implements Stage.Listener {
                     "インカムが増えるのは敵を送ったときだけ。守るか伸ばすかが勝負どころ",
                     NamedTextColor.YELLOW));
             human.sendMessage(Component.text(
+                    "送ったモンスターが相手のコアに届くと、自分のライフが 1 戻る（上限まで）",
+                    NamedTextColor.GREEN));
+            human.sendMessage(Component.text(
                     "準備 60 秒のあいだに迷路とタワーを組んでください", NamedTextColor.GRAY));
+            if (aiDirector != null) {
+                human.sendMessage(Component.text(
+                        "相手は " + aiDirector.policyName() + " です", NamedTextColor.DARK_AQUA));
+            }
         }
+    }
+
+    // ================================================================ 観戦
+
+    /**
+     * 観戦者として試合へ入る。
+     *
+     * <p>島を持たないので、建築の手札もサイドバーの資源も出さない。
+     * 代わりに <b>全部の島のパーティクル</b> を見られるように、
+     * すべての島の観客リストへ入れる。1 つの島だけに入れると、
+     * 隣の島へ飛んだ瞬間に経路も弾も見えなくなる。</p>
+     */
+    private void enterAsSpectator(Player watcher) {
+        PlayerSession session = session(watcher);
+        session.leaveStage();
+        spectators.add(watcher.getUuid());
+        watching.put(watcher.getUuid(), 0);
+
+        watcher.setInstance(versusInstance, versus.overviewOf(versus.participants().get(0)));
+        preparePlayer(watcher);
+        for (VersusPlayer participant : versus.participants()) {
+            if (participant.island() != null) {
+                participant.island().addPlayer(watcher);
+            }
+        }
+        refreshSpectatorHotbar(watcher);
+
+        watcher.sendMessage(Component.text("── 観戦 ──", NamedTextColor.LIGHT_PURPLE,
+                TextDecoration.BOLD));
+        watcher.sendMessage(Component.text(
+                "1〜4 番のアイテムで速度（一時停止〜16 倍）、6 番で島の移動",
+                NamedTextColor.AQUA));
+        watcher.sendMessage(Component.text(
+                "速度を変えると敵もタワーも収入も送りも、まとめてその速さになります",
+                NamedTextColor.GRAY));
+    }
+
+    private boolean isSpectator(Player player) {
+        return spectators.contains(player.getUuid());
+    }
+
+    private void refreshSpectatorHotbar(Player watcher) {
+        VersusPlayer target = watchedParticipant(watcher);
+        SpectatorHud.applyHotbar(watcher, clock, target == null ? "—" : target.name());
+    }
+
+    private VersusPlayer watchedParticipant(Player watcher) {
+        if (versus == null) {
+            return null;
+        }
+        List<VersusPlayer> participants = versus.participants();
+        int seat = watching.getOrDefault(watcher.getUuid(), 0);
+        return participants.isEmpty() ? null : participants.get(seat % participants.size());
+    }
+
+    /** 観戦中の右クリック。速度と視点だけを扱う。 */
+    private void spectatorAction(PlayerSession session) {
+        Player watcher = session.player();
+        switch (watcher.getHeldSlot()) {
+            case SpectatorHud.SLOT_SLOWER -> changeSpeed(clock::slower);
+            case SpectatorHud.SLOT_FASTER -> changeSpeed(clock::faster);
+            case SpectatorHud.SLOT_PAUSE -> changeSpeed(clock::togglePause);
+            case SpectatorHud.SLOT_NORMAL -> changeSpeed(clock::reset);
+            case SpectatorHud.SLOT_NEXT_ISLAND -> nextIsland(watcher);
+            case SpectatorHud.SLOT_LEAVE -> leaveSpectating(watcher);
+            default -> {
+            }
+        }
+    }
+
+    /**
+     * 速度を変えて、観戦者全員に知らせる。
+     *
+     * <p>速度は試合に 1 つしかない。人ごとに違う速さで動かすには
+     * 島の状態を人数ぶん持つことになり、それはもう同じ試合ではない。</p>
+     */
+    private void changeSpeed(Runnable change) {
+        change.run();
+        for (UUID id : spectators) {
+            PlayerSession session = sessions.get(id);
+            if (session == null) {
+                continue;
+            }
+            refreshSpectatorHotbar(session.player());
+            session.player().sendActionBar(Component.text("速度 " + clock.label(),
+                    clock.paused() ? NamedTextColor.YELLOW : NamedTextColor.AQUA));
+        }
+    }
+
+    /**
+     * その人だけ観戦をやめる。
+     *
+     * <p>試合を畳むのは <b>見ている人も戦っている人も居なくなったとき</b> だけ。
+     * 観戦者が抜けただけで人間の対戦まで終わらせると、
+     * 「見に来た人が帰ったら試合が消えた」ことになる。</p>
+     */
+    private void leaveSpectating(Player watcher) {
+        spectators.remove(watcher.getUuid());
+        watching.remove(watcher.getUuid());
+        if (versus != null) {
+            for (VersusPlayer participant : versus.participants()) {
+                if (participant.island() != null) {
+                    participant.island().removePlayer(watcher);
+                }
+            }
+        }
+        watcher.setInstance(lobby, new Pos(0.5, LOBBY_Y + 1, 0.5));
+        preparePlayer(watcher);
+        Hud.applyLobbyHotbar(watcher);
+
+        if (spectators.isEmpty() && versusHumans.isEmpty()) {
+            cleanupVersus();
+        }
+    }
+
+    /** 次の島の真上へ飛ぶ。8 島まで並ぶので、歩いて回るには広い。 */
+    private void nextIsland(Player watcher) {
+        List<VersusPlayer> participants = versus.participants();
+        if (participants.isEmpty()) {
+            return;
+        }
+        int seat = (watching.getOrDefault(watcher.getUuid(), 0) + 1) % participants.size();
+        watching.put(watcher.getUuid(), seat);
+        VersusPlayer target = participants.get(seat);
+        watcher.teleport(versus.overviewOf(target));
+        refreshSpectatorHotbar(watcher);
+        watcher.sendActionBar(Component.text(target.name() + " の島", NamedTextColor.AQUA));
     }
 
     /** 対戦中の右クリック。 */
     private void versusAction(PlayerSession session) {
         Player player = session.player();
+        if (isSpectator(player)) {
+            spectatorAction(session);
+            return;
+        }
         VersusPlayer self = versusPlayerOf(player);
         if (self == null || !self.alive()) {
             return;
@@ -590,13 +854,20 @@ public final class Mazeward implements Stage.Listener {
     }
 
     private void cleanupVersus() {
+        if (aiDirector != null) {
+            aiDirector.close();
+            aiDirector = null;
+        }
         if (versus != null) {
             versus.dispose();
             versus = null;
         }
         bots.clear();
         versusHumans.clear();
+        spectators.clear();
+        watching.clear();
         matchEndedTick = -1;
+        clock.reset();
         for (PlayerSession session : sessions.values()) {
             session.leaveStage();
         }
@@ -607,13 +878,42 @@ public final class Mazeward implements Stage.Listener {
         }
     }
 
+    /**
+     * 対戦の 1 サーバー tick。
+     *
+     * <p><b>試合を何回進めるかだけを速度で変える。</b> 敵・タワー・弾・収入・
+     * カード配布・AI の判断はすべて試合の tick を数えて動いているので、
+     * ここで回数を変えれば全部が同じ倍率で速くなる。
+     * 途中の回では経路の描画を省く（同じ線を 16 回描いても見た目は変わらない）。</p>
+     *
+     * <p>画面の更新（サイドバー・ホットバー）は <b>サーバー tick のまま</b>。
+     * 16 倍速で 16 回描き替えても読めないし、パケットが増えるだけ。</p>
+     */
     private void tickVersus() {
-        versus.tick();
-        for (MirrorBot bot : bots) {
-            bot.tick(versus.elapsedTicks(), versus);
+        int steps = clock.stepsThisTick();
+        for (int step = 0; step < steps && versus != null && !versus.finished(); step++) {
+            boolean last = step == steps - 1;
+            versus.tick(last);
+            for (MirrorBot bot : bots) {
+                bot.tick(versus.elapsedTicks(), versus);
+            }
+            if (aiDirector != null) {
+                aiDirector.tick(versus.elapsedTicks());
+            }
         }
+        if (versus == null) {
+            return;
+        }
+
         for (PlayerSession session : sessions.values()) {
-            VersusPlayer self = versusPlayerOf(session.player());
+            Player player = session.player();
+            if (isSpectator(player)) {
+                if (tick % 10 == 0) {
+                    SpectatorHud.updateSidebar(session, versus, aiDirector, clock);
+                }
+                continue;
+            }
+            VersusPlayer self = versusPlayerOf(player);
             if (session.field() == null || self == null) {
                 continue;
             }
@@ -626,6 +926,9 @@ public final class Mazeward implements Stage.Listener {
                 VersusHud.applyHotbar(session, self, versus);
             }
         }
+        if (aiDirector != null && tick % 20 == 0) {
+            announceAiActions();
+        }
 
         // 決着してもその場に留まると、次の試合を始められない
         if (matchEndedTick >= 0 && tick - matchEndedTick > 100) {
@@ -633,9 +936,40 @@ public final class Mazeward implements Stage.Listener {
         }
     }
 
+    /**
+     * AI が直前に打った手を観戦者へ流す。
+     *
+     * <p>盤面が勝手に変わるのを眺めるだけだと、何が起きたのか分からない。
+     * <b>誰が何をしたか</b> が読めて初めて「観戦」になる。</p>
+     */
+    private void announceAiActions() {
+        if (spectators.isEmpty()) {
+            return;
+        }
+        List<VersusPlayer> participants = versus.participants();
+        for (UUID id : spectators) {
+            PlayerSession session = sessions.get(id);
+            if (session == null) {
+                continue;
+            }
+            int seat = watching.getOrDefault(id, 0);
+            if (seat >= participants.size() || !aiDirector.controls(seat)) {
+                continue;
+            }
+            SpectatorHud.showAction(session.player(), participants.get(seat),
+                    aiDirector.lastAction(seat));
+        }
+    }
+
     private void returnEveryoneToLobby() {
         List<Player> players = new ArrayList<>();
         for (UUID id : versusHumans.keySet()) {
+            PlayerSession session = sessions.get(id);
+            if (session != null) {
+                players.add(session.player());
+            }
+        }
+        for (UUID id : spectators) {
             PlayerSession session = sessions.get(id);
             if (session != null) {
                 players.add(session.player());

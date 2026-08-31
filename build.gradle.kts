@@ -48,6 +48,17 @@ tasks.register<JavaExec>("combatSim") {
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }
 
+// Headless run of an AI-vs-AI match: policy bridge (or greedy fallback), speed multiplier.
+// `gradle aiSim --args="4 --brain"` connects to ai/mc_brain.py; without --brain it uses the
+// greedy bot, which is exactly what the game does when the bridge is down.
+tasks.register<JavaExec>("aiSim") {
+    group = "verification"
+    description = "Simulates an AI-driven versus match headlessly"
+    mainClass.set("dev.antigravity.mazeward.dev.AiSim")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+}
+
 // Headless verification of the versus mode (islands, economy, sending, win condition).
 tasks.register<JavaExec>("versusSim") {
     group = "verification"

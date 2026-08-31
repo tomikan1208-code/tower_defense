@@ -64,12 +64,13 @@ public enum AttackerKind {
     BULWARK("庇護者", EnemyKind.AEGIS, 150, 4, 3, 230, 260,
             Material.SHIELD, "周りの味方の被ダメージを 35% 減らす。数を並べただけでは溶けない"),
 
-    REAPER("終焉騎", EnemyKind.REAPER, 260, 0, 4, 300, 420,
+    REAPER("終焉騎", EnemyKind.REAPER, 1000, 0, 4, 300, 420,
             Material.NETHERITE_SCRAP,
             "一度目に倒れても出発点へ戻り、相手のライフ上限を 1 奪う。インカムは増えない"),
 
-    CALAMITY("災厄", EnemyKind.BOSS, 400, 0, 5, 350, 2200,
-            Material.WITHER_SKELETON_SKULL, "インカムは増えない。削り切るための最終手段");
+    CALAMITY("災厄", EnemyKind.BOSS, 400, 0, 5, 350, 6600,
+            Material.WITHER_SKELETON_SKULL,
+            "コアに触れても消えず、出発点へ戻って何周でも来る。インカムは増えない最終手段");
 
     private final String displayName;
     private final EnemyKind body;

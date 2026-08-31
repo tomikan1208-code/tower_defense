@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 学習コントロールパネル</title>
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="header">
+    <div class="brand">
+        <div class="brand-mark">🎮</div>
+        <div>
+            <div class="brand-title" id="appTitle">AI 学習コントロールパネル</div>
+            <div class="brand-sub">強化学習ダッシュボード</div>
+        </div>
+    </div>
+    <div class="header-right">
+        <div class="status-badge">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">待機中</span>
+            <b id="statusGen"></b>
+        </div>
+        <button class="btn btn-primary" id="startBtn">▶ 学習開始</button>
+        <button class="btn btn-secondary" id="stopBtn" disabled>■ 停止</button>
+        <button class="btn btn-ghost btn-icon" id="settingsBtn" title="設定">⚙️</button>
+    </div>
+</header>
+
+<nav class="tabbar">
+    <div class="segmented" id="tabbar">
+        <button data-tab="progress" class="active">進捗</button>
+        <button data-tab="charts">グラフ</button>
+        <button data-tab="replay">対局ビューア</button>
+        <button data-tab="balance">バランス</button>
+    </div>
+</nav>
+
+<main class="main">
+
+    <section class="view active" id="view-progress">
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">現在の状態</div>
+                <div class="card-note" id="progressNote">待機中</div>
+            </div>
+            <div class="tiles" id="progressTiles"></div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">世代の記録</div>
+                <div class="card-note" id="genCountNote"></div>
+            </div>
+            <div class="table-wrap">
+                <div class="table-scroll">
+                    <table id="genTable">
+                        <thead><tr id="genHead"></tr></thead>
+                        <tbody id="genTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <details class="raw-log">
+            <summary>生ログを表示</summary>
+            <div class="log-view" id="logView"></div>
+        </details>
+    </section>
+
+    <section class="view" id="view-charts">
+        <!-- フィルタは全グラフ共通。個々のグラフの中には置かない -->
+        <div class="filter-row">
+            <span class="filter-label">表示範囲</span>
+            <div class="chart-toolbar" id="rangeButtons">
+                <button class="btn btn-ghost" data-range="100">直近100世代</button>
+                <button class="btn btn-ghost active" data-range="0">全期間</button>
+            </div>
+            <span class="filter-note">数値の一覧は「進捗」タブの表で確認できます</span>
+        </div>
+        <div id="chartCards"></div>
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">人数別の勝率</div>
+                <div class="card-note">人数で最適戦略が変わるので、まとめず並べて比べる</div>
+            </div>
+            <div class="small-multiples" id="playerCharts"></div>
+        </div>
+    </section>
+
+    <section class="view" id="view-replay">
+        <div class="filter-row">
+            <span class="filter-label">対局</span>
+            <div class="field" style="min-width:150px">
+                <select class="select" id="replayPlayers">
+                    <option value="2">2 人（1v1）</option>
+                    <option value="4">4 人（FFA）</option>
+                    <option value="8">8 人（FFA）</option>
+                </select>
+            </div>
+            <div class="field" style="min-width:200px">
+                <select class="select" id="replayCheckpoint">
+                    <option value="">基準ボット同士</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" id="replayRun">対局を生成</button>
+            <span class="filter-note" id="replayNote">まだ生成していません</span>
+        </div>
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">盤面</div>
+                <div class="card-note" id="replayLegend"></div>
+            </div>
+            <div class="filter-row">
+                <span class="filter-label">時点</span>
+                <input type="range" id="replaySlider" min="0" max="0" value="0"
+                       style="flex:1">
+                <span class="filter-note" id="replayTime"></span>
+            </div>
+            <div id="replayBoards"></div>
+        </div>
+        <div class="card">
+            <div class="card-head"><div class="card-title">送り履歴</div></div>
+            <div class="table-wrap">
+                <div class="table-scroll">
+                    <table id="sendTable">
+                        <thead><tr><th>経過</th><th>送った人</th><th>種類</th>
+                            <th class="num">コスト</th></tr></thead>
+                        <tbody id="sendBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="view" id="view-balance">
+        <div class="filter-row">
+            <button class="btn btn-primary" id="balanceRun">診断を実行</button>
+            <button class="btn btn-ghost" id="balanceRunFast">机上計算のみ（速い）</button>
+            <button class="btn btn-ghost" id="balanceSync">Java と突き合わせ</button>
+            <span class="filter-note" id="balanceNote">まだ診断していません</span>
+        </div>
+        <div class="card" id="syncCard" style="display:none">
+            <div class="card-head"><div class="card-title">balance.py ⇄ Java enum</div>
+                <div class="card-note" id="syncNote"></div></div>
+            <div id="syncBody"></div>
+        </div>
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">診断結果と推奨値</div>
+                <div class="card-note">推奨値は自動適用しません。内容を確認してから適用してください</div>
+            </div>
+            <div id="findingList" class="log-view"></div>
+        </div>
+        <div id="balanceTables"></div>
+    </section>
+
+</main>
+
+<div class="overlay" id="settingsOverlay"></div>
+<aside class="panel" id="settingsPanel">
+    <div class="panel-head">
+        <div class="panel-title">⚙️ 学習設定</div>
+        <button class="btn btn-ghost btn-icon" id="settingsClose">✕</button>
+    </div>
+    <div class="panel-body">
+        <div class="field">
+            <label class="field-label" for="modeSelect">学習モード</label>
+            <select class="select" id="modeSelect"></select>
+        </div>
+        <div class="field-row">
+            <div class="field">
+                <label class="field-label" for="gensInput">回す世代数</label>
+                <input type="number" class="input" id="gensInput" value="20" min="1">
+            </div>
+            <div class="field">
+                <label class="field-label" for="envsInput">同時試合数</label>
+                <input type="number" class="input" id="envsInput" placeholder="自動"
+                       min="2" step="2">
+            </div>
+        </div>
+        <div class="field-row">
+            <div class="field">
+                <label class="field-label" for="genEarlyInput">
+                    完了を待つ上限（ゲーム内・分）
+                </label>
+                <input type="number" class="input" id="genEarlyInput" value="30"
+                       min="1" step="5">
+            </div>
+            <div class="field">
+                <label class="field-label" for="genMaxInput">
+                    打ち切り（ゲーム内・分）
+                </label>
+                <input type="number" class="input" id="genMaxInput" value="60"
+                       min="2" step="5">
+            </div>
+        </div>
+        <div class="field-row">
+            <div class="field">
+                <label class="field-label" for="finishEarlyInput">
+                    上限までに求める完了率
+                </label>
+                <input type="number" class="input" id="finishEarlyInput" value="1.0"
+                       min="0" max="1" step="0.05">
+            </div>
+            <div class="field">
+                <label class="field-label" for="finishLateInput">
+                    上限を過ぎたあとの完了率
+                </label>
+                <input type="number" class="input" id="finishLateInput" value="0.9"
+                       min="0" max="1" step="0.05">
+            </div>
+        </div>
+        <div class="field">
+            <label class="field-label" for="matchMaxInput">
+                1 試合の時間切れ（ゲーム内・分）／0 = 時間切れなし
+            </label>
+            <input type="number" class="input" id="matchMaxInput" value="0"
+                   min="0" step="1">
+        </div>
+        <div class="field-help">
+            <b>0 なら試合を時間で打ち切りません。</b>誰かが脱落して決着したときだけ
+            終わります（世代の打ち切りが最後の歯止め）。<br>
+            値を入れるとその分で強制終了しますが、<b>15 分未満にするとサドンデス
+            （漏れダメージ2倍）が発動しなくなる</b>ので注意してください。
+        </div>
+        <div class="field-help">
+            <b>世代の区切り</b>は固定ステップ数ではなく<b>試合の切れ目</b>で決めます。
+            1 ステップ = ゲーム内 1 秒。<br>
+            「ゲーム内 30 分以下なら完了率 100%」「30 分以上なら 90%」
+            「60 分超えで打ち切り」が既定です。
+        </div>
+        <div class="field">
+            <label class="field-label" for="randomizeInput">
+                ドメインランダム化の強さ
+            </label>
+            <input type="number" class="input" id="randomizeInput" value="0.20"
+                   min="0" max="0.5" step="0.05">
+        </div>
+        <div class="field-help">
+            環境数は空欄なら実機に合わせて自動で決まります（この環境は numpy で
+            CPU 側を回すので、VRAM ではなく論理コア数から決めます）。<br>
+            ドメインランダム化は、試合ごとに塔・敵・経済の数値へ ±この割合の
+            スケールを掛けます。0 にすると素の数値だけで学習しますが、
+            <b>バランスを変えたときに方策が壊れやすくなります</b>。
+        </div>
+    </div>
+</aside>
+
+<script src="/static/chart.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

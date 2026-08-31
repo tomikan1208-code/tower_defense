@@ -21,7 +21,8 @@ import net.minestom.server.sound.SoundEvent;
  * <p>ルールは Hypixel の TowerWars を下敷きにしている。</p>
  * <ul>
  *   <li>ライフ 20。送られたモンスターが自陣に到達するたびに減る</li>
- *   <li>コインは 10 秒ごとに「インカム」ぶん入る</li>
+ *   <li>コインは一定間隔で「インカム」ぶん入る。間隔は人数が少ないほど短くなる
+ *       （2 人なら 5 秒、7 人以上で 10 秒）</li>
  *   <li><b>インカムが増えるのは送ったときだけ</b>。守りに使うか収入に回すかが最大の判断</li>
  *   <li>撃破するとコインが入り、そのぶんインカムも少し伸びる</li>
  *   <li>送りは相手を選べない。<b>生き残っている全員に同時に飛ぶ</b></li>
@@ -39,8 +40,19 @@ public final class VersusMatch {
     /** 準備時間。迷路は落ち着いて組みたいので、開幕だけは送りを止める。 */
     public static final int PREP_TICKS = 20 * 60;
 
-    /** 収入が入る間隔。 */
+    /** 収入が入る間隔（人数が揃っているときの基準）。 */
     public static final int INCOME_INTERVAL = 20 * 10;
+
+    /**
+     * 収入間隔の下限。少人数でもここより速くはしない。
+     *
+     * <p>送りは生存者全員に飛ぶので、人数が少ないほど自分に届く敵も少なくなり、
+     * 撃破報酬が減ってコインが貯まらない。そのぶんを定期収入の速さで補う。</p>
+     */
+    public static final int MIN_INCOME_INTERVAL = 20 * 5;
+
+    /** ここまで人数がいれば基準どおりの 10 秒間隔になる。 */
+    private static final int FULL_LOBBY = 7;
 
     /** ストックの回復間隔。 */
     public static final int STOCK_INTERVAL = 20;
@@ -69,6 +81,7 @@ public final class VersusMatch {
     private final long seed;
 
     private int tick;
+    private int incomeTimer;
     private boolean finished;
     private VersusPlayer winner;
 
@@ -146,6 +159,34 @@ public final class VersusMatch {
         return tick >= SUDDEN_DEATH_TICKS ? 2 : 1;
     }
 
+    /** 生き残っている参加者の数。 */
+    public int aliveCount() {
+        int count = 0;
+        for (VersusPlayer participant : participants) {
+            if (participant.alive()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 現在の収入間隔。生存者 1 人につき 1 秒ぶん延び、7 人以上で基準の 10 秒になる。
+     *
+     * <p>2 人なら 5 秒 = 基準の 2 倍の速さ。脱落で人数が減ったときも同じように
+     * 速くなるので、終盤に経済が止まって膠着することがない。</p>
+     */
+    public int incomeInterval() {
+        int alive = Math.max(2, Math.min(FULL_LOBBY, aliveCount()));
+        int interval = INCOME_INTERVAL - (FULL_LOBBY - alive) * 20;
+        return Math.max(MIN_INCOME_INTERVAL, interval);
+    }
+
+    /** 収入間隔の秒数。表示用。 */
+    public int incomeSeconds() {
+        return incomeInterval() / 20;
+    }
+
     // ================================================================ 準備
 
     /**
@@ -187,14 +228,27 @@ public final class VersusMatch {
     // ================================================================ 毎 tick
 
     public void tick() {
+        tick(true);
+    }
+
+    /**
+     * 1 tick 進める。
+     *
+     * @param render 見た目（経路のパーティクル）を描くか。
+     *               観戦の倍速で 1 サーバー tick に何度も進めるとき、
+     *               <b>最後の 1 回以外は描かない</b>。同じ線を 8 回描いても
+     *               見た目は変わらないのに、パケットだけ 8 倍になる
+     */
+    public void tick(boolean render) {
         if (finished) {
             return;
         }
         tick++;
 
         for (VersusPlayer participant : participants) {
+            participant.decaySendHistory();
             if (participant.island() != null) {
-                participant.island().tick();
+                participant.island().tick(render);
             }
         }
 
@@ -203,7 +257,10 @@ public final class VersusMatch {
                 participant.regenerateStock();
             }
         }
-        if (tick % INCOME_INTERVAL == 0) {
+        // 間隔は人数で変わるので、剰余ではなく専用のタイマーで数える
+        incomeTimer++;
+        if (incomeTimer >= incomeInterval()) {
+            incomeTimer = 0;
             for (VersusPlayer participant : participants) {
                 if (participant.alive()) {
                     participant.applyIncomeTick();
@@ -266,7 +323,7 @@ public final class VersusMatch {
             if (other == sender || !other.alive() || other.island() == null) {
                 continue;
             }
-            other.island().receive(kind);
+            other.island().receive(kind, sender);
             targets++;
         }
 
