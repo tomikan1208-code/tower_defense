@@ -177,9 +177,9 @@ public final class Mazeward implements Stage.Listener {
         roadmap.setGenerator(unit -> {
         });
         lobby.setTime(6000);
-        lobby.setTimeRate(0);
+        lobby.defaultClock().rate(0f);
         roadmap.setTime(18000);
-        roadmap.setTimeRate(0);
+        roadmap.defaultClock().rate(0f);
         buildLobby();
         waitingRoom = new WaitingRoom(lobby);
     }
@@ -595,7 +595,7 @@ public final class Mazeward implements Stage.Listener {
         versusInstance.setGenerator(unit -> {
         });
         versusInstance.setTime(6000);
-        versusInstance.setTimeRate(0);
+        versusInstance.defaultClock().rate(0f);
 
         int playerCount = humans.size() + botFill + aiCount;
         long seed = new Random().nextLong();
@@ -1161,7 +1161,7 @@ public final class Mazeward implements Stage.Listener {
         stageInstance.setGenerator(unit -> {
         });
         stageInstance.setTime(6000);
-        stageInstance.setTimeRate(0);
+        stageInstance.defaultClock().rate(0f);
 
         stage = new Stage(stageInstance, generated, run, this);
         Pos overview = stage.arena().overviewPos(stage.grid());

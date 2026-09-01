@@ -62,14 +62,59 @@ def enabled():
 def _request(method, path, body=None, timeout=_TIMEOUT):
     url = base_url() + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        # ngrok の無料プランは、素の要求に「アクセスしようとしています」という
+        # HTML の警告ページを返す。このヘッダが無いと JSON ではなく HTML が
+        # 返り、json.loads が「Expecting value: line 1 column 1」で落ちる。
+        # 接続テストも学習開始も、これが原因で全部失敗していた。
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "mazeward-dashboard/1",
+    }
     token = load_config().get("token", "").strip()
     if token:
         headers["X-API-Token"] = token
     req = urllib.request.Request(
         url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read().decode("utf-8", errors="replace")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        head = " ".join(raw.lstrip()[:80].split())
+        raise RuntimeError(
+            "JSON が返ってきません（ngrok の警告ページか、URL が制御サーバーを"
+            f"指していない可能性）: {head}") from None
+
+
+def describe_error(e) -> str:
+    """例外を、利用者が次に何をすればよいか分かる文言に変える。"""
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code == 401:
+            return "認証に失敗しました（API トークンが Colab 側と一致していません）"
+        return f"HTTP {e.code} {e.reason}"
+    if isinstance(e, urllib.error.URLError):
+        return f"接続できません（URL・ngrok の起動を確認）: {e.reason}"
+    if isinstance(e, TimeoutError):
+        return "応答がありません（タイムアウト）"
+    return str(e)
+
+
+def safe(fn, *args, **kwargs):
+    """GUI から呼ぶ操作は **例外を投げない**。
+
+    投げると Flask が 500 を返し、画面側は JSON を読めずに黙って失敗する。
+    「開始ボタンを押しても何も起きない」の原因がこれだった。
+    """
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": "Colab: " + describe_error(e),
+                "error": describe_error(e)}
+    if isinstance(result, dict):
+        result.setdefault("ok", True)
+        return result
+    return {"ok": True, "result": result}
 
 
 def health():
@@ -80,8 +125,9 @@ def health():
         st = _request("GET", "/healthz", timeout=_TIMEOUT)
         ok = bool(st and st.get("ok"))
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)}
-    return {"ok": ok, "service": (st or {}).get("service") if ok else None}
+        return {"ok": False, "error": describe_error(e)}
+    return {"ok": ok, "service": (st or {}).get("service") if ok else None,
+            "error": "" if ok else "制御サーバーが ok を返しません"}
 
 
 def check_test():
@@ -98,11 +144,11 @@ def check_test():
 
 # ── GUI が呼ぶ操作 ──
 def start(body):
-    return _request("POST", "/colab/start", body)
+    return _request("POST", "/colab/start", body, timeout=30.0)
 
 
 def stop():
-    return _request("POST", "/colab/stop", {})
+    return _request("POST", "/colab/stop", {}, timeout=20.0)
 
 
 def status():
@@ -112,3 +158,15 @@ def status():
 def history():
     d = _request("GET", "/colab/history")
     return d.get("records", []) if isinstance(d, dict) else []
+
+def state():
+    """ヘッダー表示用のまとめ。**「向き先」と「実際に繋がっているか」は別物**
+    なので両方返す（有効にしただけで繋がったと誤解しないように）。"""
+    cfg = load_config()
+    return {
+        "url": cfg.get("url", ""),
+        "enabled": bool(cfg.get("enabled") and cfg.get("url")),
+        "ok": bool(cfg.get("ok")),
+        "last_check": cfg.get("last_check"),
+        "last_error": cfg.get("last_error", ""),
+    }

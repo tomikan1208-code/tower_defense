@@ -29,11 +29,26 @@
     }
 
     async function post(url, body) {
-        const res = await fetch(url, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body || {}),
-        });
-        return res.json();
+        // サーバが 500 を返すと本文は HTML なので res.json() が例外になる。
+        // 呼び出し側は await post(...) を try で囲っていないため、
+        // **押しても何も起きない**状態になっていた。必ず形の揃った
+        // オブジェクトを返し、失敗を画面に出せるようにする。
+        try {
+            const res = await fetch(url, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body || {}),
+            });
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                return { ok: false,
+                         message: 'サーバの応答が JSON ではありません (HTTP '
+                                  + res.status + '): ' + text.slice(0, 200) };
+            }
+        } catch (e) {
+            return { ok: false, message: '通信に失敗しました: ' + (e.message || e) };
+        }
     }
 
     // ── 進捗タブ ──
@@ -54,7 +69,20 @@
         const doneGen = latest ? latest.episode : 0;
         const showGen = (live && live.episode) ? live.episode : doneGen;
 
-        $('runtimeState').textContent = runtimeText;
+        // 「Colab に向けている」ことと「実際に繋がっている」ことは別物。
+        // 分けて出さないと、有効にしただけで接続できたと誤解する
+        const cb = st.colab || {};
+        let badge = runtimeText;
+        if (st.runtime === 'colab') badge += cb.ok ? '（接続OK）' : '（未接続）';
+        $('runtimeState').textContent = badge;
+        const badgeEl = $('runtimeBadge');
+        if (badgeEl) {
+            badgeEl.title = st.runtime === 'colab'
+                ? (cb.url || '') + (cb.ok ? '' : ' / ' + (cb.last_error || '未接続'))
+                : 'ローカルPCで学習します';
+            badgeEl.style.color = st.runtime !== 'colab' ? ''
+                : (cb.ok ? '#4caf50' : '#f44336');
+        }
 
         const tiles = [
             tile('現在の世代', showGen, '',
@@ -670,6 +698,10 @@
             $('colabUrl').value = st.url || '';
             $('colabToken').value = st.token || '';
             $('colabEnabled').checked = !!st.enabled;
+            // コピー用の表示。毎回 Colab の出力を探さずに済むようにする
+            const show = (id, v) => { const el = $(id); if (el) el.textContent = v || '—'; };
+            show('colabUrlShow', st.url);
+            show('colabTokenShow', st.token);
             renderColabStatus(st);
         }
         function renderColabStatus(st) {
@@ -690,10 +722,52 @@
             if (!res.ok) alert(res.message || '保存に失敗しました');
             await loadColabState();
         });
+        // 切替はチェックボックスを触った瞬間に反映する。
+        // 以前は「接続設定を保存」を押すまで反映されず、
+        // **ローカルと Colab を切り替えられない**ように見えていた
+        $('colabEnabled').addEventListener('change', async function () {
+            const on = $('colabEnabled').checked;
+            const res = await post('/api/colab/config', { enabled: on });
+            if (res.ok === false) {
+                alert(res.message || '切り替えに失敗しました');
+                $('colabEnabled').checked = !on;
+                return;
+            }
+            await loadColabState();
+            applyStatus(await getJSON('/api/status'));
+            await loadHistory();
+        });
         $('colabTest').addEventListener('click', async function () {
             $('colabStatus').textContent = '接続テスト中…';
             const res = await post('/api/colab/test', {});
-            renderColabStatus(Object.assign({}, res, { ok: !!res.ok, enabled: $('colabEnabled').checked }));
+            renderColabStatus(Object.assign({}, res, {
+                ok: !!res.ok, enabled: $('colabEnabled').checked,
+                last_check: new Date().toLocaleTimeString('ja-JP'),
+                last_error: res.error || res.message || '',
+            }));
+            applyStatus(await getJSON('/api/status'));
+            alert(res.ok ? 'Colab に接続できました。'
+                         : '接続できませんでした: ' + (res.error || res.message || ''));
+        });
+        // コピーボタン（クリップボードが使えない環境では選択状態にする）
+        document.querySelectorAll('[data-copy]').forEach(function (btn) {
+            btn.addEventListener('click', async function () {
+                const el = $(btn.dataset.copy);
+                if (!el) return;
+                const text = el.textContent.trim();
+                if (!text || text === '—') return;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    const old = btn.textContent;
+                    btn.textContent = 'コピーしました';
+                    setTimeout(() => { btn.textContent = old; }, 1200);
+                } catch (e) {
+                    const r = document.createRange();
+                    r.selectNodeContents(el);
+                    const sel = window.getSelection();
+                    sel.removeAllRanges(); sel.addRange(r);
+                }
+            });
         });
         await loadColabState();
 

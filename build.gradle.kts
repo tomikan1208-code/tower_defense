@@ -11,7 +11,7 @@ repositories {
 }
 
 dependencies {
-    implementation("net.minestom:minestom:2026.03.25-1.21.11")
+    implementation("net.minestom:minestom:2026.08.28-26.2")
     implementation("org.slf4j:slf4j-simple:2.0.13")
 }
 

@@ -39,7 +39,7 @@ import net.minestom.server.color.Color;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
-import net.minestom.server.entity.metadata.other.SlimeMeta;
+import net.minestom.server.entity.metadata.cube.SlimeMeta;
 import net.minestom.server.instance.Instance;
 import net.minestom.server.instance.block.Block;
 import net.minestom.server.particle.Particle;

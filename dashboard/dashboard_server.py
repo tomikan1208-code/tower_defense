@@ -638,33 +638,55 @@ def api_config():
                     "metrics": METRICS, "dict_metrics": DICT_METRICS})
 
 
-@app.route("/api/status")
-def api_status():
+def build_status():
+    """実行先(runtime)を必ず付けた状態を返す。
+
+    **HTTP の /api/status と SSE の両方がこれを使う。** 片方だけが
+    runtime を付けていると、切り替えた直後は Colab 表示になるのに
+    0.5 秒後の SSE で Local に戻る、という挙動になる（実際になった）。
+    """
     if colab_remote.enabled():
         try:
             payload = colab_remote.status()
-            payload.setdefault("runtime", "colab")
-            payload.setdefault("runtime_label", "Colab")
-            return jsonify(payload)
+            payload["runtime"] = "colab"
+            payload["runtime_label"] = "Colab"
+            payload["colab"] = dict(colab_remote.state(), ok=True)
+            return payload
         except Exception as e:
-            return jsonify({"is_running": False, "mode": None, "live": None, "latest": None,
-                            "gen_count": 0, "pace_sec": None,
-                            "runtime": "colab", "runtime_label": "Colab",
-                            "logs": [{"tag": "error", "text": f"Colab に接続できません: {e}",
-                                      "time": time.strftime("%H:%M:%S")}],
-                            "log_version": f"err-{time.time():.3f}"
-                            })
+            return {"is_running": False, "mode": None, "live": None,
+                    "latest": None, "gen_count": 0, "pace_sec": None,
+                    "runtime": "colab", "runtime_label": "Colab",
+                    "colab": dict(colab_remote.state(), ok=False,
+                                  last_error=colab_remote.describe_error(e)),
+                    "logs": [{"tag": "error",
+                              "text": "Colab に接続できません: "
+                                      + colab_remote.describe_error(e),
+                              "time": time.strftime("%H:%M:%S")}],
+                    "log_version": f"err-{time.time():.3f}"}
     payload = manager.status()
-    payload.setdefault("runtime", "local")
-    payload.setdefault("runtime_label", "Local")
-    return jsonify(payload)
+    payload["runtime"] = "local"
+    payload["runtime_label"] = "Local"
+    payload["colab"] = colab_remote.state()
+    return payload
+
+
+@app.route("/api/status")
+def api_status():
+    return jsonify(build_status())
 
 
 @app.route("/api/history")
 def api_history():
     if colab_remote.enabled():
-        return jsonify({"records": colab_remote.history()})
-    return jsonify({"records": manager.records()})
+        try:
+            return jsonify({"records": colab_remote.history(), "source": "colab"})
+        except Exception as e:  # noqa: BLE001
+            # 取得できないときは黙って空にせず、ローカルの記録を出して
+            # 「なぜ Colab の記録が出ないのか」を画面に伝える
+            return jsonify({"records": manager.records(), "source": "local",
+                            "warning": "Colab の記録を取得できません: "
+                                       + colab_remote.describe_error(e)})
+    return jsonify({"records": manager.records(), "source": "local"})
 
 
 @app.route("/api/colab/state")
@@ -705,7 +727,10 @@ def api_colab_test():
 def api_start():
     d = request.json or {}
     if colab_remote.enabled():
-        return jsonify(colab_remote.start(d))
+        # safe() を通すので、失敗しても {"ok": false, "message": ...} が返る。
+        # 生の例外を投げると Flask が 500 を返し、画面側は JSON を読めずに
+        # 「押しても何も起きない」状態になる
+        return jsonify(colab_remote.safe(colab_remote.start, d))
     extra = {"RANDOMIZE": d.get("randomize", 0.20)}
     for key, env_key in (("gen_early", "GEN_EARLY_MIN"),
                          ("gen_max", "GEN_MAX_MIN"),
@@ -722,7 +747,7 @@ def api_start():
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     if colab_remote.enabled():
-        return jsonify(colab_remote.stop())
+        return jsonify(colab_remote.safe(colab_remote.stop))
     ok, msg = manager.stop()
     return jsonify({"ok": ok, "message": msg})
 
@@ -790,9 +815,9 @@ def api_stream():
     """状態が変わったときだけ送る。判定には進捗の値そのものを含める
     （ログ件数だけだと上限到達後に更新が止まる）。"""
     def status_provider():
-        if colab_remote.enabled():
-            return colab_remote.status()
-        return manager.status()
+        # HTTP と同じ組み立てを使う。ここで runtime を落とすと、
+        # 切り替えた実行先が 0.5 秒で元に戻って見える
+        return build_status()
 
     def generate():
         last = None
@@ -800,9 +825,13 @@ def api_stream():
             try:
                 st = status_provider()
             except Exception as e:
-                st = {"is_running": False, "mode": None, "live": None, "latest": None,
-                      "gen_count": 0, "pace_sec": None,
-                      "logs": [{"tag":"error", "text": f"Colab に接続できません: {e}",
+                st = {"is_running": False, "mode": None, "live": None,
+                      "latest": None, "gen_count": 0, "pace_sec": None,
+                      "runtime": "colab" if colab_remote.enabled() else "local",
+                      "runtime_label": "Colab" if colab_remote.enabled() else "Local",
+                      "colab": colab_remote.state(),
+                      "logs": [{"tag": "error",
+                                "text": f"状態を取得できません: {e}",
                                 "time": time.strftime("%H:%M:%S")}],
                       "log_version": f"err-{time.time():.3f}"}
             live = st.get("live") or {}

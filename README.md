@@ -21,7 +21,7 @@ Minecraft の 3D 空間・ブロック・パーティクル・Display Entity を
 ```
 
 `start-server.ps1` が JDK 25 とローカル Gradle を自動で探して起動する。
-起動後、**無改造の Minecraft Java Edition 1.21.11** で `localhost` に接続するだけ。
+起動後、**無改造の Minecraft Java Edition 26.2** で `localhost` に接続するだけ。
 クライアント MOD もリソースパックも不要。
 
 Git Bash から直接動かす場合:
@@ -178,7 +178,7 @@ python mc_brain.py --greedy   # いちばん確率の高い手だけを打つ（
 | Fabric / NeoForge Mod | △ | 可能だがバニラ Mob AI とワールド生成を抱えたまま戦うことになる |
 | **Minestom**（採用） | ◎ | Java 製のサーバ実装。**バニラクライアントがそのまま繋がる**。エンティティと経路を 100% 自前制御でき、Mob AI が邪魔しない |
 
-- 対象バージョン: **Minecraft Java Edition 1.21.11**（Minestom `2026.03.25-1.21.11`）
+- 対象バージョン: **Minecraft Java Edition 26.2**（Minestom `2026.08.28-26.2`）
 - Display Entity（1.19.4+）を前提にしているので要求仕様の 1.16.5 は下限としては満たすが、
   ゴースト表示の質が落ちるため 1.21 系を推奨バージョンとして選定した。
 

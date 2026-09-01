@@ -231,7 +231,7 @@ public final class Hud {
         var block = card.hasRune()
                 ? card.rune().wallBlock()
                 : field.arena().theme().wallForVariant(card.variant());
-        Material material = block.registry().material();
+        Material material = block.material();
         return material == null ? Material.STONE_BRICKS : material;
     }
 

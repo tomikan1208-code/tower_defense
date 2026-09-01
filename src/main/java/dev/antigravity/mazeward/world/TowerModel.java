@@ -9,7 +9,7 @@ import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.EquipmentSlot;
 import net.minestom.server.entity.LivingEntity;
 import net.minestom.server.entity.attribute.Attribute;
-import net.minestom.server.entity.metadata.other.SlimeMeta;
+import net.minestom.server.entity.metadata.cube.SlimeMeta;
 import net.minestom.server.entity.metadata.villager.VillagerMeta;
 import net.minestom.server.instance.Instance;
 import net.minestom.server.item.ItemStack;

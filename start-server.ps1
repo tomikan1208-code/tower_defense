@@ -66,5 +66,5 @@ if ($listen) {
 }
 
 Write-Host "JAVA_HOME=$env:JAVA_HOME"
-Write-Host "Starting MAZEWARD. Connect a vanilla Minecraft 1.21.11 client to localhost."
+Write-Host "Starting MAZEWARD. Connect a vanilla Minecraft 26.2 client to localhost."
 & $gradleBat run
