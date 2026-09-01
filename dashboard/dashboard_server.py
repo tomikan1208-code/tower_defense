@@ -31,6 +31,8 @@ if hasattr(sys.stdout, "reconfigure"):
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _AI = os.path.join(os.path.dirname(_BASE), "ai")
 sys.path.insert(0, _AI)
+sys.path.insert(0, _BASE)
+import colab_remote  # noqa: E402
 
 
 # ══════════════════════════════════════════════════
@@ -84,6 +86,7 @@ METRICS = [
     {"key": "avg_income_final", "label": "最終インカム", "fmt": "float"},
     {"key": "avg_coin_efficiency", "label": "コイン効率", "fmt": "float"},
     {"key": "tower_count_final", "label": "最終タワー数", "fmt": "float"},
+    {"key": "tower_avg_level", "label": "タワー平均レベル", "fmt": "float"},
     # --- 人数 / 相手 ---
     {"key": "num_players", "label": "平均人数", "fmt": "float"},
     {"key": "counter_push_rate", "label": "カウンタープッシュ率", "fmt": "rate"},
@@ -91,7 +94,7 @@ METRICS = [
 ]
 
 # 「名前 → 数値」の入れ子辞書で記録している指標
-DICT_METRICS = ["win_rate_by_players"]
+DICT_METRICS = ["win_rate_by_players", "tower_type_rates", "send_type_rates", "leak_type_rates"]
 # ══════════════════════════════════════════════════
 
 
@@ -637,17 +640,65 @@ def api_config():
 
 @app.route("/api/status")
 def api_status():
+    if colab_remote.enabled():
+        try:
+            return jsonify(colab_remote.status())
+        except Exception as e:
+            return jsonify({"is_running": False, "mode": None, "live": None, "latest": None,
+                            "gen_count": 0, "pace_sec": None,
+                            "logs": [{"tag": "error", "text": f"Colab に接続できません: {e}",
+                                      "time": time.strftime("%H:%M:%S")}],
+                            "log_version": f"err-{time.time():.3f}"
+                            })
     return jsonify(manager.status())
 
 
 @app.route("/api/history")
 def api_history():
+    if colab_remote.enabled():
+        return jsonify({"records": colab_remote.history()})
     return jsonify({"records": manager.records()})
+
+
+@app.route("/api/colab/state")
+def api_colab_state():
+    cfg = colab_remote.load_config()
+    return jsonify({"url": cfg.get("url", ""), "enabled": bool(cfg.get("enabled")),
+                    "ok": bool(cfg.get("ok")), "token": cfg.get("token", ""), "last_check": cfg.get("last_check"),
+                    "last_error": cfg.get("last_error", "")})
+
+
+@app.route("/api/colab/config", methods=["POST"])
+def api_colab_config():
+    d = request.json or {}
+    cfg = colab_remote.load_config()
+    if "url" in d:
+        cfg["url"] = (d["url"] or "").strip().rstrip("/")
+    if "enabled" in d:
+        cfg["enabled"] = bool(d["enabled"])
+    if "token" in d:
+        cfg["token"] = (d["token"] or "").strip()
+    colab_remote.save_config(cfg)
+    return jsonify({
+        "ok": True,
+        "config": {
+            "url": cfg["url"],
+            "enabled": cfg["enabled"],
+            "token": cfg.get("token", ""),
+        },
+    })
+
+
+@app.route("/api/colab/test", methods=["POST"])
+def api_colab_test():
+    return jsonify(colab_remote.check_test())
 
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
     d = request.json or {}
+    if colab_remote.enabled():
+        return jsonify(colab_remote.start(d))
     extra = {"RANDOMIZE": d.get("randomize", 0.20)}
     for key, env_key in (("gen_early", "GEN_EARLY_MIN"),
                          ("gen_max", "GEN_MAX_MIN"),
@@ -663,6 +714,8 @@ def api_start():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
+    if colab_remote.enabled():
+        return jsonify(colab_remote.stop())
     ok, msg = manager.stop()
     return jsonify({"ok": ok, "message": msg})
 
@@ -729,12 +782,24 @@ def api_checkpoints():
 def api_stream():
     """状態が変わったときだけ送る。判定には進捗の値そのものを含める
     （ログ件数だけだと上限到達後に更新が止まる）。"""
+    def status_provider():
+        if colab_remote.enabled():
+            return colab_remote.status()
+        return manager.status()
+
     def generate():
         last = None
         while True:
-            st = manager.status()
+            try:
+                st = status_provider()
+            except Exception as e:
+                st = {"is_running": False, "mode": None, "live": None, "latest": None,
+                      "gen_count": 0, "pace_sec": None,
+                      "logs": [{"tag":"error", "text": f"Colab に接続できません: {e}",
+                                "time": time.strftime("%H:%M:%S")}],
+                      "log_version": f"err-{time.time():.3f}"}
             live = st.get("live") or {}
-            sig = (st["is_running"], len(st["logs"]), st["log_version"],
+            sig = (st.get("is_running"), len(st.get("logs") or []), st.get("log_version"),
                    live.get("step"), live.get("games_finished"), live.get("fps"))
             if sig != last:
                 last = sig
@@ -743,6 +808,52 @@ def api_stream():
     return Response(generate(), mimetype="text/event-stream")
 
 
+import drive_sync
+
+
+@app.route("/api/drive/state")
+def api_drive_state():
+    return jsonify(drive_sync.get_state())
+
+
+@app.route("/api/drive/connect", methods=["POST"])
+def api_drive_connect():
+    ok, msg = drive_sync.connect_async()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/drive/disconnect", methods=["POST"])
+def api_drive_disconnect():
+    ok, msg = drive_sync.disconnect()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/drive/sync", methods=["POST"])
+def api_drive_sync():
+    d = request.json or {}
+    action = d.get("action", "download")
+    include_pts = bool(d.get("include_checkpoints", False))
+    ok, msg = drive_sync.run_async(action, include_checkpoints=include_pts)
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/drive/upload_code", methods=["POST"])
+def api_drive_upload_code():
+    ok, msg = drive_sync.run_async("upload_code")
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/drive/config", methods=["POST"])
+def api_drive_config():
+    d = request.json or {}
+    cfg = drive_sync.load_config()
+    if "folder" in d:
+        cfg["folder"] = d["folder"]
+    drive_sync.save_config(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
 if __name__ == "__main__":
     print(f"  {APP_TITLE}\n  http://localhost:{PORT}")
     app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)
+
