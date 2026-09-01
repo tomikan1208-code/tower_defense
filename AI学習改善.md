@@ -193,4 +193,144 @@ MAZEWARD AI 自己診断
 この状態であれば、次に「本番運用向けに start-ai.bat からの自動起動」「URL 自動保存」「バージョン確認」「再接続補助」まで広げることも可能です。
 
 ---
+
+## 追記: リモート制御の UI 改善と起動状態の可視化（2026-09-01）
+
+### 1. 問題の背景
+
+接続テスト「接続OK」後に、以下の 2 つの課題が生じていました。
+
+- **課題1**: GUI 画面上で「いま Local で動いているのか、Colab で動いているのか」が分からない
+  - 実行先が不明確なため、ユーザーが混乱しやすい
+  - ローカル / Colab の切り替え時に状態が明示されていない
+- **課題2**: 学習開始ボタンが、Colab 側の起動失敗後すぐに再押下可能になる
+  - 失敗理由が不明瞭なまま再試行される
+  - UI 上で「起動要求を送った」と「起動が成功した」の区別がない
+
+### 2. 実装した修正内容
+
+#### ① ヘッダーに実行先表示を追加 (`dashboard/web/index.html`)
+
+```html
+<div class="status-badge" id="runtimeBadge" style="margin-left: 8px; margin-right: 8px;">
+    <span>実行先:</span>
+    <b id="runtimeState">Local</b>
+</div>
 ```
+
+- ヘッダーの「待機中」表示の右隣に「実行先: Local」または「実行先: Colab」と表示
+- ユーザーが一目で現在の実行先を確認可能
+
+#### ② 状態 API に runtime 情報を追加 (`dashboard/dashboard_server.py`, `ai/mazeward_colab_control.py`)
+
+API レスポンス（`/api/status`）に以下の 2 フィールドを新規追加：
+
+```json
+{
+  "is_running": true,
+  "mode": "リーグ自己対戦",
+  "runtime": "local",
+  "runtime_label": "Local",
+  ...
+}
+```
+
+または Colab 時：
+
+```json
+{
+  "is_running": true,
+  "mode": "リーグ自己対戦",
+  "runtime": "colab",
+  "runtime_label": "Colab",
+  ...
+}
+```
+
+- ローカル実行時: `runtime="local"`, `runtime_label="Local"`
+- Colab 実行時: `runtime="colab"`, `runtime_label="Colab"`
+
+#### ③ 起動中フラグで重複起動を防止 (`dashboard/web/app.js`)
+
+状態オブジェクトに `startPending` フラグを追加し、以下のロジックを実装：
+
+```javascript
+const state = { 
+  config: null, status: {}, history: [], range: 0, logVersion: null, 
+  startPending: false  // ← 追加
+};
+```
+
+起動ボタンのクリックハンドラ：
+
+```javascript
+$('startBtn').addEventListener('click', async function () {
+    if (state.startPending) return;  // 既に起動要求中なら無視
+    state.startPending = true;
+    $('startBtn').disabled = true;
+    
+    try {
+        const res = await post('/api/start', {...});
+        if (!res.ok) {
+            alert(res.message || '学習を開始できませんでした');
+            // 失敗時は 1.2 秒後に再有効化
+            setTimeout(() => {
+                state.startPending = false;
+                $('startBtn').disabled = !!state.status.is_running;
+            }, 1200);
+            return;
+        }
+        openPanel(false);
+    } finally {
+        if (state.status && state.status.is_running) {
+            state.startPending = false;
+        }
+    }
+});
+```
+
+- 起動要求送信中は `startPending = true` で再クリックを無視
+- 失敗時は 1.2 秒後に `false` へ戻し、再試行を促す
+- 成功時は `is_running` が `true` になるまで `disabled` のまま
+
+#### ④ ヘッダーの進捗ノート表示に実行先を加える (`dashboard/web/app.js`)
+
+```javascript
+const runtimeText = st.runtime_label || runtime;
+const noteBase = st.is_running ? (st.mode || '学習中')
+    : (recs.length ? '待機中（記録済み ' + recs.length + ' 世代）' : '待機中');
+$('progressNote').textContent = '実行先: ' + runtimeText + ' / ' + noteBase;
+```
+
+- 例: 「実行先: Colab / 学習中」
+- 例: 「実行先: Local / 待機中（記録済み 42 世代）」
+
+### 3. 変更ファイル一覧
+
+- `dashboard/dashboard_server.py`: `/api/status` に `runtime`, `runtime_label` を追加
+- `dashboard/web/index.html`: ヘッダーにランタイムバッジを追加
+- `dashboard/web/app.js`: `startPending` フラグと起動ロジック、表示ロジックを修正
+- `ai/mazeward_colab_control.py`: `status()` メソッドに `runtime`, `runtime_label` を追加
+
+### 4. 動作確認結果
+
+```
+python -m py_compile dashboard/dashboard_server.py ai/mazeward_colab_control.py
+EXIT:0
+```
+
+全ファイルの Python 構文チェック完了。
+
+### 5. ユーザー体験の改善点
+
+#### Before
+- 画面を見ても「今どっちで動いているのか」がわからない
+- 起動失敗後、ボタンがすぐ押せるようになるため、ユーザーが何度も連打してしまう可能性
+
+#### After
+- ヘッダーに「実行先: Local / Colab」が常に表示される
+- 進捗ノートにも実行先と学習状態がセットで表示される
+- 起動失敗時は警告アラート + 1.2 秒待機のため、ユーザーがエラーを認識して対処できる
+- 起動成功時は自動的にボタンが無効になり、状態が安定する
+
+---

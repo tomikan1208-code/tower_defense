@@ -272,9 +272,13 @@ class ColabTrainingManager:
             "latest": latest,
             "gen_count": len(records),
             "pace_sec": self._pace(records),
+            "runtime": "colab",
+            "runtime_label": "Colab",
             "logs": logs,
             "log_version": f"{_mtime(LOG_FILE):.3f}:{len(records)}",
-}
+        }
+
+
 app = Flask(__name__)
 manager = ColabTrainingManager()
 

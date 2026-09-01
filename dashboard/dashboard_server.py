@@ -642,15 +642,22 @@ def api_config():
 def api_status():
     if colab_remote.enabled():
         try:
-            return jsonify(colab_remote.status())
+            payload = colab_remote.status()
+            payload.setdefault("runtime", "colab")
+            payload.setdefault("runtime_label", "Colab")
+            return jsonify(payload)
         except Exception as e:
             return jsonify({"is_running": False, "mode": None, "live": None, "latest": None,
                             "gen_count": 0, "pace_sec": None,
+                            "runtime": "colab", "runtime_label": "Colab",
                             "logs": [{"tag": "error", "text": f"Colab に接続できません: {e}",
                                       "time": time.strftime("%H:%M:%S")}],
                             "log_version": f"err-{time.time():.3f}"
                             })
-    return jsonify(manager.status())
+    payload = manager.status()
+    payload.setdefault("runtime", "local")
+    payload.setdefault("runtime_label", "Local")
+    return jsonify(payload)
 
 
 @app.route("/api/history")

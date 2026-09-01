@@ -141,8 +141,8 @@ public final class VersusPlayer implements EnemySource {
         return teamColor;
     }
 
-    /** マルチプレイでのチーム色を設定。 */
-    void setTeamColor(NamedTextColor color) {
+    /** マルチプレイでのチーム色を設定。参加者を組み立てる {@code Mazeward} から呼ぶ。 */
+    public void setTeamColor(NamedTextColor color) {
         this.teamColor = color;
     }
 

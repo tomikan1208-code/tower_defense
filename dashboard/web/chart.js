@@ -198,15 +198,16 @@
             svg.appendChild(t);
         }
 
-        // ── 折れ線（実線=主系列 / 破線=副系列） ──
+        // ── 折れ線 ──
         series.forEach(function (s) {
             if (!s.points.length) return;
             const d = s.points.map(function (p, i) {
                 return (i === 0 ? 'M' : 'L') + xOf(p.x).toFixed(2) + ' ' + yOf(p.y).toFixed(2);
             }).join(' ');
+            const strokeColor = s.color || (s.dash ? INK3 : INK);
             svg.appendChild(el('path', {
                 d: d, fill: 'none',
-                stroke: s.dash ? INK3 : INK,
+                stroke: strokeColor,
                 'stroke-width': 2,
                 'stroke-dasharray': s.dash ? '5 4' : null,
                 'stroke-linejoin': 'round', 'stroke-linecap': 'round'
@@ -214,10 +215,31 @@
             if (s.points.length === 1) {
                 const p = s.points[0];
                 svg.appendChild(el('circle', {
-                    cx: xOf(p.x), cy: yOf(p.y), r: 4, fill: s.dash ? INK3 : INK
+                    cx: xOf(p.x), cy: yOf(p.y), r: 4, fill: strokeColor
                 }));
             }
         });
+
+        // ── 凡例（SVG上部） ──
+        if (series.length > 1) {
+            const legendGroup = el('g', { transform: 'translate(' + pad.left + ', 8)' });
+            let lx = 0;
+            series.forEach(function (s) {
+                const color = s.color || (s.dash ? INK3 : INK);
+                legendGroup.appendChild(el('line', {
+                    x1: lx, x2: lx + 16, y1: -4, y2: -4,
+                    stroke: color, 'stroke-width': 2,
+                    'stroke-dasharray': s.dash ? '4 3' : null
+                }));
+                const txt = el('text', {
+                    x: lx + 20, y: 0, 'font-size': 11, fill: INK3
+                });
+                txt.textContent = s.label || s.key;
+                legendGroup.appendChild(txt);
+                lx += (s.label || s.key).length * 11 + 36;
+            });
+            svg.appendChild(legendGroup);
+        }
 
         // ── ホバー ──
         const guide = el('line', {

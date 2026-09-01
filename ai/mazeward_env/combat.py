@@ -549,15 +549,37 @@ class Boards:
         """生きている敵を前に詰める。死んだ枠を放置すると距離行列の幅が
         減らないので、意思決定ごとに 1 回だけ整理する。**これが効くから
         序盤の 1 ステップが数十倍速い。**"""
-        order = np.argsort(~self.en_alive, axis=1, kind="stable")
+        max_e = int(self.en_count.max())
+        if max_e == 0:
+            return
+        
+        # 整理が必要な島（途中にFalseがある島）のみフィルタリング
+        # 前方がTrueで後方がFalseの境界が en_alive.sum() と一致していなければ穴がある
+        counts = self.en_alive[:, :max_e].sum(axis=1)
+        self.en_count = counts.astype(np.int32)
+        if max_e == 0:
+            return
+
+        # 穴がある（途中にDeadがある）島を特定
+        # prefixが全てTrueでない島があるか
+        # 簡易判定: 前から counts[b] 個が全て True かどうか
+        grid_slice = self.en_alive[:, :max_e]
+        rows = np.arange(self.n)
+        # counts[b] が 0 の島、または全スロットが埋まっている島は除外できる
+        needs_compact = (counts > 0) & (counts < max_e)
+        if not needs_compact.any():
+            return
+
+        order = np.argsort(~grid_slice[needs_compact], axis=1, kind="stable")
+        sub_idx = np.flatnonzero(needs_compact)
+        
         for name in ("en_alive", "en_body", "en_attacker", "en_hp", "en_max_hp",
                      "en_progress", "en_reward", "en_slot", "en_slow_ticks",
                      "en_slow", "en_burn_ticks", "en_burn", "en_vuln_ticks",
                      "en_vuln", "en_ward_ticks", "en_ward", "en_blink_cd",
                      "en_revives", "en_hit", "en_sender"):
-            setattr(self, name,
-                    np.take_along_axis(getattr(self, name), order, axis=1))
-        self.en_count = self.en_alive.sum(axis=1).astype(np.int32)
+            arr = getattr(self, name)
+            arr[sub_idx, :max_e] = np.take_along_axis(arr[sub_idx, :max_e], order, axis=1)
 
     # ---------------------------------------------------------------- 戦闘
     def advance(self, ticks: int, dt: int, sudden_death: np.ndarray) -> None:
@@ -1119,6 +1141,10 @@ class Boards:
         np.subtract.at(self.lives, b, np.where(sudden_death[b], 2.0, 1.0))
         self.lives = np.maximum(0.0, self.lives)
         np.add.at(self.stat_leaks, b, 1)
+        att = np.maximum(self.en_attacker[b, e], 0)
+        # 呼び出し元(env)の stat_leaks_by_kind に加算するため、boards の参照から追記
+        if hasattr(self, 'env_ref') and self.env_ref is not None:
+            np.add.at(self.env_ref.stat_leaks_by_kind, (b, att), 1.0)
 
         # 通した送り主にライフを 1 返す。**上限は超えない。** (Island#rewardSender)
         # 送りが「相手を削る」だけでなく「自分の立て直し」にもなるので、

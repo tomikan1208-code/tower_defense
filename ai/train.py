@@ -414,15 +414,17 @@ def ppo_update(net: Policy, opt, buf: Rollout, adv, ret, cfg: TrainConfig):
     if len(idx_all) < 8:
         return {"loss": 0.0, "kl": 0.0, "entropy": 0.0, "value_loss": 0.0}
 
-    grid = flat(buf.grid)
-    scalar = flat(buf.scalar)
-    opponents = flat(buf.opponents)
-    opp_mask = flat(buf.opp_mask)
-    masks = {k: flat(v) for k, v in buf.masks.items()}
-    actions = {k: flat(v) for k, v in buf.actions.items()}
-    old_logp = flat(buf.logp)
+    grid_t = torch.as_tensor(flat(buf.grid), device=DEVICE)
+    scalar_t = torch.as_tensor(flat(buf.scalar), device=DEVICE)
+    opponents_t = torch.as_tensor(flat(buf.opponents), device=DEVICE)
+    opp_mask_t = torch.as_tensor(flat(buf.opp_mask), device=DEVICE)
+    masks_t = {k: torch.as_tensor(flat(v), device=DEVICE) for k, v in buf.masks.items()}
+    actions_t = {k: torch.as_tensor(flat(v), device=DEVICE) for k, v in buf.actions.items()}
+    old_logp_t = torch.as_tensor(flat(buf.logp), device=DEVICE)
     adv_f, ret_f = flat(adv), flat(ret)
     adv_f = (adv_f - adv_f[idx_all].mean()) / (adv_f[idx_all].std() + 1e-8)
+    adv_t = torch.as_tensor(adv_f, device=DEVICE)
+    ret_t = torch.as_tensor(ret_f, device=DEVICE)
 
     stats = {"loss": [], "kl": [], "entropy": [], "value_loss": []}
     net.train()
@@ -432,19 +434,20 @@ def ppo_update(net: Policy, opt, buf: Rollout, adv, ret, cfg: TrainConfig):
             mb = idx_all[start:start + cfg.minibatch]
             if len(mb) < 8:
                 continue
+            mb_t = torch.as_tensor(mb, device=DEVICE)
             obs_mb = {
-                "grid": torch.as_tensor(grid[mb], device=DEVICE),
-                "scalar": torch.as_tensor(scalar[mb], device=DEVICE),
-                "opponents": torch.as_tensor(opponents[mb], device=DEVICE),
-                "opp_mask": torch.as_tensor(opp_mask[mb], device=DEVICE),
+                "grid": grid_t[mb_t],
+                "scalar": scalar_t[mb_t],
+                "opponents": opponents_t[mb_t],
+                "opp_mask": opp_mask_t[mb_t],
             }
-            m_mb = {k: torch.as_tensor(v[mb], device=DEVICE) for k, v in masks.items()}
-            a_mb = {k: torch.as_tensor(v[mb], device=DEVICE) for k, v in actions.items()}
+            m_mb = {k: v[mb_t] for k, v in masks_t.items()}
+            a_mb = {k: v[mb_t] for k, v in actions_t.items()}
             logp, ent, value = net.evaluate(obs_mb, m_mb, a_mb)
 
-            old = torch.as_tensor(old_logp[mb], device=DEVICE)
-            advantage = torch.as_tensor(adv_f[mb], device=DEVICE)
-            target = torch.as_tensor(ret_f[mb], device=DEVICE)
+            old = old_logp_t[mb_t]
+            advantage = adv_t[mb_t]
+            target = ret_t[mb_t]
 
             ratio = torch.exp(logp - old)
             pg = -torch.min(ratio * advantage,
@@ -804,6 +807,17 @@ def main() -> None:
             metrics["leaks_per_game"] = float(np.mean([i["leaks"] for i in infos]))
             metrics["tower_count_final"] = float(np.mean([i["towers"] for i in infos]))
             metrics["avg_income_final"] = float(np.mean([i["income"] for i in infos]))
+            metrics["tower_avg_level"] = float(np.mean([i.get("tower_avg_level", 0.0) for i in infos]))
+            
+            # 辞書型集計 (平均化)
+            for dict_key in ("tower_type_rates", "send_type_rates", "leak_type_rates"):
+                merged = {}
+                for info in infos:
+                    sub = info.get(dict_key, {})
+                    for k, v in sub.items():
+                        merged[k] = merged.get(k, 0.0) + v / len(infos)
+                metrics[dict_key] = merged
+
             drawn = sum(i["cards_drawn"] for i in infos)
             metrics["card_usage_rate"] = (sum(i["cards_played"] for i in infos)
                                           / max(drawn, 1.0))

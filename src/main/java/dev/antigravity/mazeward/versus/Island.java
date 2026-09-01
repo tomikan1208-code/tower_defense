@@ -7,12 +7,13 @@ import dev.antigravity.mazeward.run.Modifiers;
 import dev.antigravity.mazeward.run.Wallet;
 import dev.antigravity.mazeward.stage.Battlefield;
 import dev.antigravity.mazeward.tower.TowerKind;
+import dev.antigravity.mazeward.world.ArenaRenderer;
 import dev.antigravity.mazeward.world.Palette;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.minestom.server.block.Block;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.instance.Instance;
+import net.minestom.server.instance.block.Block;
 
 /**
  * 対戦での 1 人ぶんの防衛島。
@@ -218,33 +219,56 @@ public final class Island extends Battlefield {
         int width = grid.width();
         int height = grid.height();
 
+        // 座標は ArenaRenderer が持つ。原点はアクセサ越しに読む（フィールドは private）
+        Instance world = arena.instance();
+        int originX = arena.originX();
+        int originZ = arena.originZ();
+        int y = ArenaRenderer.FLOOR_Y - 1;
+
         // 上下の辺
         for (int x = -margin; x < width + margin; x++) {
-            arena.instance.setBlock(arena.originX + x, Battlefield.FLOOR_Y - 1, arena.originZ - margin, teamBlock);
-            arena.instance.setBlock(arena.originX + x, Battlefield.FLOOR_Y - 1, arena.originZ + height + margin - 1, teamBlock);
+            world.setBlock(originX + x, y, originZ - margin, teamBlock);
+            world.setBlock(originX + x, y, originZ + height + margin - 1, teamBlock);
         }
 
         // 左右の辺
         for (int z = 0; z < height; z++) {
-            arena.instance.setBlock(arena.originX - margin, Battlefield.FLOOR_Y - 1, arena.originZ + z, teamBlock);
-            arena.instance.setBlock(arena.originX + width + margin - 1, Battlefield.FLOOR_Y - 1, arena.originZ + z, teamBlock);
+            world.setBlock(originX - margin, y, originZ + z, teamBlock);
+            world.setBlock(originX + width + margin - 1, y, originZ + z, teamBlock);
         }
     }
 
     /**
      * NamedTextColor に対応したウール（羊毛）ブロックを返す。
+     *
+     * <p>{@code NamedTextColor} は enum ではなく定数オブジェクトなので
+     * {@code switch} のラベルには使えない。等値比較で引く。</p>
      */
     private Block getWoolBlockForColor(NamedTextColor color) {
-        return switch (color) {
-            case RED -> Block.RED_WOOL;
-            case BLUE -> Block.BLUE_WOOL;
-            case GREEN -> Block.GREEN_WOOL;
-            case YELLOW -> Block.YELLOW_WOOL;
-            case LIGHT_PURPLE -> Block.MAGENTA_WOOL;
-            case AQUA -> Block.CYAN_WOOL;
-            case GOLD -> Block.ORANGE_WOOL;
-            case DARK_AQUA -> Block.LIGHT_BLUE_WOOL;
-            default -> Block.WHITE_WOOL;
-        };
+        if (NamedTextColor.RED.equals(color)) {
+            return Block.RED_WOOL;
+        }
+        if (NamedTextColor.BLUE.equals(color)) {
+            return Block.BLUE_WOOL;
+        }
+        if (NamedTextColor.GREEN.equals(color)) {
+            return Block.GREEN_WOOL;
+        }
+        if (NamedTextColor.YELLOW.equals(color)) {
+            return Block.YELLOW_WOOL;
+        }
+        if (NamedTextColor.LIGHT_PURPLE.equals(color)) {
+            return Block.MAGENTA_WOOL;
+        }
+        if (NamedTextColor.AQUA.equals(color)) {
+            return Block.CYAN_WOOL;
+        }
+        if (NamedTextColor.GOLD.equals(color)) {
+            return Block.ORANGE_WOOL;
+        }
+        if (NamedTextColor.DARK_AQUA.equals(color)) {
+            return Block.LIGHT_BLUE_WOOL;
+        }
+        return Block.WHITE_WOOL;
     }
 }

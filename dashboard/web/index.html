@@ -23,6 +23,10 @@
             <span id="statusText">待機中</span>
             <b id="statusGen"></b>
         </div>
+        <div class="status-badge" id="runtimeBadge" style="margin-left: 8px; margin-right: 8px;">
+            <span>実行先:</span>
+            <b id="runtimeState">Local</b>
+        </div>
         <button class="btn btn-primary" id="startBtn">▶ 学習開始</button>
         <button class="btn btn-secondary" id="stopBtn" disabled>■ 停止</button>
         <button class="btn btn-ghost btn-icon" id="settingsBtn" title="設定">⚙️</button>
@@ -35,6 +39,7 @@
         <button data-tab="charts">グラフ</button>
         <button data-tab="replay">対局ビューア</button>
         <button data-tab="balance">バランス</button>
+        <button data-tab="drive">☁️ Colab・Drive連携</button>
     </div>
 </nav>
 
@@ -52,16 +57,32 @@
         <div class="card">
             <div class="card-head">
                 <div class="card-title">世代の記録</div>
-                <div class="card-note" id="genCountNote"></div>
+                <div class="card-note" id="genCountNote">クリックすると下に詳細が表示されます</div>
             </div>
             <div class="table-wrap">
                 <div class="table-scroll">
                     <table id="genTable">
-                        <thead><tr id="genHead"></tr></thead>
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="episode">世代 <span class="arrow">▾</span></th>
+                                <th class="sortable" data-sort="game_minutes">1 世代のゲーム内時間(分) <span class="arrow">▾</span></th>
+                                <th class="sortable" data-sort="seconds_per_gen">1 世代の実時間(秒) <span class="arrow">▾</span></th>
+                                <th class="sortable" data-sort="games_finished">対局数 <span class="arrow">▾</span></th>
+                                <th class="sortable" data-sort="finish_rate">決着した対局％ <span class="arrow">▾</span></th>
+                            </tr>
+                        </thead>
                         <tbody id="genTableBody"></tbody>
                     </table>
                 </div>
             </div>
+        </div>
+
+        <div class="card" id="genDetailCard" style="display:none;">
+            <div class="card-head">
+                <div class="card-title" id="genDetailTitle">第 — 世代の詳細指標</div>
+                <div class="card-note">各割合や詳細数値を表示中</div>
+            </div>
+            <div class="tiles" id="genDetailTiles" style="padding:16px;"></div>
         </div>
 
         <details class="raw-log">
@@ -83,8 +104,8 @@
         <div id="chartCards"></div>
         <div class="card">
             <div class="card-head">
-                <div class="card-title">人数別の勝率</div>
-                <div class="card-note">人数で最適戦略が変わるので、まとめず並べて比べる</div>
+                <div class="card-title">人数別・種類別の比率</div>
+                <div class="card-note">2人/4人/8人や、タワー・モンスターの種類ごとに分けて並べて比べる</div>
             </div>
             <div class="small-multiples" id="playerCharts"></div>
         </div>
@@ -155,6 +176,65 @@
             <div id="findingList" class="log-view"></div>
         </div>
         <div id="balanceTables"></div>
+    </section>
+
+    <section class="view" id="view-drive">
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">☁️ Google Drive / Colab 連携</div>
+                <div class="card-note">Google Colab 上の GPU 学習データ（ログ・モデル）を取り込んでローカルで分析・操作できます</div>
+            </div>
+            <div style="padding:16px; display:flex; flex-direction:column; gap:16px;">
+                <div id="driveNotice" style="padding:12px; border-radius:8px; background:rgba(255,255,255,0.05); font-size:13px; line-height:1.6;">
+                    読み込み中...
+                </div>
+
+                <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                    <button class="btn btn-primary" id="driveConnectBtn">🔐 Drive に接続</button>
+                    <button class="btn btn-secondary" id="driveDisconnectBtn" style="display:none;">🔓 接続解除</button>
+                    <button class="btn btn-primary" id="driveSyncBtn" disabled>🔄 学習ログを取得 (colab_data/)</button>
+                    <button class="btn btn-secondary" id="driveUploadCodeBtn" disabled>📤 コードを Colab へ送信</button>
+                </div>
+
+                <div id="driveStatusMsg" style="font-size:13px; color:#4caf50; display:none;"></div>
+                <div id="driveErrorMsg" style="font-size:13px; color:#f44336; display:none; white-space:pre-wrap;"></div>
+
+                <div style="margin-top:16px;">
+                    <h4 style="margin-bottom:8px;">📁 取得済み Colab データ (`colab_data/`)</h4>
+                    <div id="driveFileList" style="font-size:13px; font-family:monospace; background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; max-height:200px; overflow-y:auto;">
+                        ファイルはありません
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">🎛 Colab リモート制御（ngrok）</div>
+                <div class="card-note">Colab の学習を GUI から開始／停止／監視します。URL はノートブックの ngrok セルが出す値です</div>
+            </div>
+            <div style="padding:16px; display:flex; flex-direction:column; gap:12px;">
+                <div class="field-row">
+                    <div class="field" style="flex:3;">
+                        <label class="field-label" for="colabUrl">ngrok URL</label>
+                        <input type="text" class="input" id="colabUrl" placeholder="https://xxxx.ngrok.io">
+                    </div>
+                    <div class="field" style="flex:2;">
+                        <label class="field-label" for="colabToken">API トークン（API.txt）</label>
+                        <input type="text" class="input" id="colabToken" placeholder="ノートブックが発行">
+                    </div>
+                </div>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                    <button class="btn btn-primary" id="colabSave">接続設定を保存</button>
+                    <button class="btn btn-ghost" id="colabTest">📡 接続テスト</button>
+                    <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px;">
+                        <input type="checkbox" id="colabEnabled"> GUI の開始/停止を Colab へ向ける
+                    </label>
+                </div>
+                <div id="colabStatus" style="font-size:13px; line-height:1.6;"></div>
+                <div class="field-help">ON にすると「▶学習開始」「■停止」「状況」「グラフ」がすべて ngrok 先の Colab の学習を操作します（ローカル学習はしません）。接続テスト成功後に ON にするのが安全です。</div>
+            </div>
+        </div>
     </section>
 
 </main>

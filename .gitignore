@@ -3,6 +3,13 @@ build/
 out/
 .tools/
 bin/
+API.txt
+dashboard/colab_remote.json
+dashboard/credentials.json
+dashboard/drive_token.json
+dashboard/drive_config.json
+__pycache__/
+*.pyc
 -Users-yuuki-IdeaProjects-scorpius/
 .idea/
 *.iml

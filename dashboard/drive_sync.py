@@ -284,11 +284,11 @@ def download_blocking(include_checkpoints=False):
     return got
 
 
-def upload_blocking(paths):
+def upload_blocking(paths, target_folder=None):
     from googleapiclient.http import MediaFileUpload
 
     service = _service()
-    folder = load_config().get('folder', DEFAULT_FOLDER)
+    folder = target_folder or load_config().get('folder', DEFAULT_FOLDER)
     folder_id = find_folder(service, folder)
     if not folder_id:
         meta = {'name': folder, 'mimeType': 'application/vnd.google-apps.folder'}
@@ -321,6 +321,11 @@ def run_async(action, **kwargs):
             if action == 'download':
                 files = download_blocking(kwargs.get('include_checkpoints', False))
                 _set(files=files, message=f'{len(files)} 件を取得しました',
+                     last_sync=time.strftime('%Y-%m-%d %H:%M:%S'))
+            elif action == 'upload_code':
+                paths = [path for path, _ in code_files()]
+                sent = upload_blocking(paths, target_folder=DEFAULT_CODE_FOLDER)
+                _set(message=f'{len(sent)} 件を送信しました',
                      last_sync=time.strftime('%Y-%m-%d %H:%M:%S'))
             else:
                 sent = upload_blocking(kwargs.get('paths', []))

@@ -112,6 +112,7 @@ class VersusEnv:
         self.tables = BalanceTables(self.balances)
         self.boards = Boards(self.n, self.env_of, self.tables,
                              self.size, B.BOARD.spawns)
+        self.boards.env_ref = self
         self.obs = ObservationBuilder(self.n, self.size, self.max_towers)
 
         self.grids: List[Optional[Grid]] = [None] * self.n
@@ -172,6 +173,8 @@ class VersusEnv:
         self.stat_cards_drawn = np.zeros(n, dtype=np.float32)
         self.stat_cards_played = np.zeros(n, dtype=np.float32)
         self.stat_sends = np.zeros(n, dtype=np.float32)
+        self.stat_sends_by_kind = np.zeros((n, N_ATTACK), dtype=np.float32)
+        self.stat_leaks_by_kind = np.zeros((n, N_ATTACK), dtype=np.float32)
         self.stat_invalid = np.zeros(n, dtype=np.float32)
         self.stat_steps = np.zeros(n, dtype=np.float32)
         self.cp_chances = np.zeros(n, dtype=np.float32)
@@ -282,6 +285,8 @@ class VersusEnv:
                      "stat_sends", "stat_invalid", "stat_steps",
                      "cp_chances", "cp_hits"):
             getattr(self, name)[b] = 0.0
+        self.stat_sends_by_kind[b] = 0.0
+        self.stat_leaks_by_kind[b] = 0.0
         self.stat_cards_drawn[b] = float(t.start_hand[e])
         self.final_rank[b] = 0
 
@@ -773,6 +778,7 @@ class VersusEnv:
         sent[boards] = True
         self._acted[boards] = True
         self.stat_sends[boards] += 1.0
+        np.add.at(self.stat_sends_by_kind, (boards, kinds), 1.0)
         self.sends_total[boards] += 1.0
         self.last_send_tick[boards] = self.env_tick[env]
         self.last_send_cost[boards] = t.at_cost[env, kinds]
@@ -939,6 +945,36 @@ class VersusEnv:
         rewards[seats] += term
         self.final_rank[seats] = rank
 
+        # タワーレベルと各種類の集計
+        tw_levels = []
+        tw_type_counts = np.zeros(N_TOWER, dtype=np.float32)
+        for s in seats:
+            c = int(bd.tw_count[s])
+            if c > 0:
+                kinds = bd.tw_kind[s, :c]
+                levels = bd.tw_level[s, :c]
+                valid_k = kinds[kinds >= 0]
+                valid_l = levels[kinds >= 0]
+                if len(valid_l):
+                    tw_levels.extend(valid_l)
+                for k in valid_k:
+                    if 0 <= k < N_TOWER:
+                        tw_type_counts[k] += 1.0
+
+        total_tw = tw_type_counts.sum()
+        tw_type_rates = {B.TOWER_ORDER[i]: float(tw_type_counts[i] / total_tw) if total_tw > 0 else 0.0
+                         for i in range(N_TOWER)}
+
+        sends_k = self.stat_sends_by_kind[seats].sum(axis=0)
+        total_sends = sends_k.sum()
+        send_type_rates = {B.ATTACKER_ORDER[i]: float(sends_k[i] / total_sends) if total_sends > 0 else 0.0
+                           for i in range(N_ATTACK)}
+
+        leaks_k = self.stat_leaks_by_kind[seats].sum(axis=0)
+        total_leaks = leaks_k.sum()
+        leak_type_rates = {B.ATTACKER_ORDER[i]: float(leaks_k[i] / total_leaks) if total_leaks > 0 else 0.0
+                           for i in range(N_ATTACK)}
+
         return {
             "env": e,
             "episode": int(self.env_episode[e]),
@@ -951,6 +987,10 @@ class VersusEnv:
             "path_length": float(self.ground_len[seats].mean()),
             "tower_passes": float(self.tower_passes[seats].mean()),
             "towers": float(bd.tw_count[seats].mean()),
+            "tower_avg_level": float(np.mean(tw_levels)) if tw_levels else 0.0,
+            "tower_type_rates": tw_type_rates,
+            "send_type_rates": send_type_rates,
+            "leak_type_rates": leak_type_rates,
             "income": float(bd.income[seats].mean()),
             "sends": float(self.stat_sends[seats].mean()),
             "leaks": float(bd.stat_leaks[seats].mean()),
@@ -1077,15 +1117,13 @@ class VersusEnv:
     def _current_rank(self) -> np.ndarray:
         bd = self.boards
         key = bd.alive.astype(np.float64) * 1e6 + bd.lives * 1e3 + bd.max_lives
-        rank = np.zeros(self.n, dtype=np.float32)
-        for e in range(self.n_envs):
-            base = e * self.seats
-            p = int(self.env_players[e])
-            order = np.argsort(-key[base:base + p])
-            r = np.empty(p, dtype=np.float32)
-            r[order] = np.arange(p)
-            rank[base:base + p] = r
-        return rank
+        key_grid = key.reshape(self.n_envs, self.seats)
+        # 降順ソート
+        order = np.argsort(-key_grid, axis=1)
+        ranks_grid = np.empty((self.n_envs, self.seats), dtype=np.float32)
+        rows = np.arange(self.n_envs)[:, None]
+        ranks_grid[rows, order] = np.arange(self.seats, dtype=np.float32)
+        return ranks_grid.ravel()
 
     def _fill_opponents(self) -> None:
         """相手 1 人ぶんの要約特徴。**実ゲームで見える情報だけ**を渡す。
@@ -1119,17 +1157,35 @@ class VersusEnv:
             np.zeros(self.n, dtype=np.float32),      # 自分かどうか
         ], axis=1).astype(np.float32)
 
-        for e in range(self.n_envs):
-            base = e * self.seats
-            p = int(self.env_players[e])
-            block = feats[base:base + p]
-            for seat in range(p):
-                b = base + seat
-                # 自分を先頭に、残りを席順で並べる（席番号に意味を持たせない）
-                order = [seat] + [i for i in range(p) if i != seat]
-                o.opponents[b, :p] = block[order]
-                o.opponents[b, 0, OPP_FEATURES - 1] = 1.0
-                o.opp_mask[b, :p] = 1.0
+        # feats_grid: (n_envs, seats, OPP_FEATURES)
+        feats_grid = feats.reshape(self.n_envs, self.seats, OPP_FEATURES)
+        
+        # 席インデックスの巡回行列を作成: index_matrix[s, i] は 席 s から見た i 番目のプレイヤー
+        # 例 (seats=8): s=2 のとき [2, 0, 1, 3, 4, 5, 6, 7]
+        s_idx = np.arange(self.seats)
+        idx_matrix = np.empty((self.seats, self.seats), dtype=int)
+        for s in range(self.seats):
+            idx_matrix[s, 0] = s
+            idx_matrix[s, 1:] = [i for i in range(self.seats) if i != s]
+
+        # e_idx: (n_envs, 1, 1), s_idx: (1, seats, seats)
+        # rotated_feats: (n_envs, seats, seats, OPP_FEATURES)
+        rotated_feats = feats_grid[:, idx_matrix]  # (n_envs, seats, seats, OPP_FEATURES)
+        
+        # p_mask: (n_envs, seats) -> 各席がアクティブか
+        p_count = self.env_players  # (n_envs,)
+        active_slot = np.arange(self.seats)[None, :] < p_count[:, None]  # (n_envs, seats)
+        # opp_mask は各席から見た他プレイヤーが有効か
+        # 席sから見たi番目の元の席番号が < p_count[e] かどうか
+        active_opp_mask = active_slot[:, idx_matrix]  # (n_envs, seats, seats)
+        
+        # フラット化して o.opponents と o.opp_mask に格納
+        opponents_reshaped = rotated_feats.reshape(self.n, self.seats, OPP_FEATURES)
+        opp_mask_reshaped = active_opp_mask.reshape(self.n, self.seats).astype(np.float32)
+        
+        o.opponents[:] = opponents_reshaped * opp_mask_reshaped[:, :, None]
+        o.opponents[:, 0, OPP_FEATURES - 1] = 1.0  # 自分フラグ
+        o.opp_mask[:] = opp_mask_reshaped
 
     # ================================================================ 補助
     def ascii_board(self, b: int) -> List[str]:
