@@ -6,6 +6,7 @@ import dev.antigravity.mazeward.run.Wallet;
 import dev.antigravity.mazeward.tower.TowerKind;
 import java.util.EnumSet;
 import java.util.Set;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.entity.Player;
 
 /**
@@ -39,6 +40,9 @@ public final class VersusPlayer implements EnemySource {
     private final Deck deck = Deck.starter();
     /** 対戦では全タワーを最初から使える。解放要素はインカムによる送りの解禁だけに絞る。 */
     private final Set<TowerKind> unlocked = EnumSet.allOf(TowerKind.class);
+    
+    /** マルチプレイでのチーム色。プレイヤーの島を識別するために使用。 */
+    private NamedTextColor teamColor;
 
     private final Wallet wallet = new Wallet() {
         @Override
@@ -130,6 +134,16 @@ public final class VersusPlayer implements EnemySource {
 
     void setIsland(Island island) {
         this.island = island;
+    }
+
+    /** マルチプレイでのチーム色を取得。島の識別に使用。 */
+    public NamedTextColor teamColor() {
+        return teamColor;
+    }
+
+    /** マルチプレイでのチーム色を設定。 */
+    void setTeamColor(NamedTextColor color) {
+        this.teamColor = color;
     }
 
     // ---------------------------------------------------------------- 資源

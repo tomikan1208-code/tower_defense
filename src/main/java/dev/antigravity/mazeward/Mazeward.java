@@ -603,22 +603,37 @@ public final class Mazeward implements Stage.Listener {
         matchEndedTick = -1;
         clock.reset();
 
+        // マルチプレイ時のチーム色定義
+        NamedTextColor[] teamColors = {
+            NamedTextColor.RED, NamedTextColor.BLUE, NamedTextColor.GREEN,
+            NamedTextColor.YELLOW, NamedTextColor.LIGHT_PURPLE, NamedTextColor.AQUA,
+            NamedTextColor.GOLD, NamedTextColor.DARK_AQUA
+        };
+        
+        int playerIndex = 0;
+
         for (Player human : humans) {
             VersusPlayer participant = new VersusPlayer(human.getUsername(), human, false);
+            participant.setTeamColor(teamColors[playerIndex % teamColors.length]);
             versus.addParticipant(participant);
             versusHumans.put(human.getUuid(), participant);
+            playerIndex++;
         }
         for (int i = 1; i <= botFill; i++) {
             VersusPlayer bot = new VersusPlayer("ボット" + i, null, true);
+            bot.setTeamColor(teamColors[playerIndex % teamColors.length]);
             versus.addParticipant(bot);
             // 遅延をずらす。全員が同時に同じ手を打つと送りが一斉に来て事故になる
             bots.add(new MirrorBot(bot, 20 + i * 25));
+            playerIndex++;
         }
         List<Integer> aiSeats = new ArrayList<>();
         for (int i = 1; i <= aiCount; i++) {
             VersusPlayer ai = new VersusPlayer("AI-" + i, null, true);
+            ai.setTeamColor(teamColors[playerIndex % teamColors.length]);
             aiSeats.add(versus.participants().size());
             versus.addParticipant(ai);
+            playerIndex++;
         }
         if (!aiSeats.isEmpty()) {
             aiDirector = new AiDirector(versus, brain);
@@ -1058,11 +1073,11 @@ public final class Mazeward implements Stage.Listener {
         PlayerSession session = session(player);
         session.leaveStage();
 
-        Pos start = new Pos(0.5, ROAD_Y + 1, 0.5, 180f, 25f);
+        Pos start = new Pos(0.5, ROAD_Y + 1, 0.5, 0f, 25f);
         if (from != null) {
             RoadPad pad = padOf(from);
             if (pad != null) {
-                start = pad.center().withYaw(180f).withPitch(25f);
+                start = pad.center().withYaw(0f).withPitch(25f);
             }
         }
         player.setInstance(roadmap, start);

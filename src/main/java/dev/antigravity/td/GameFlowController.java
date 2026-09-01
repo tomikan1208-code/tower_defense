@@ -344,7 +344,7 @@ public final class GameFlowController {
         double reloadSeconds = type.cooldownTicks() / 20.0;
         
         return ItemStack.builder(tower.material())
-                .customName(Component.text(tower.displayName(), NamedTextColor.AQUA))
+                .customName(Component.text(tower.displayName()))
                 .lore(
                 Component.text("種類: タワー", NamedTextColor.GRAY),
                 Component.text(""),

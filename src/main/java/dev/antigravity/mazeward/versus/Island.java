@@ -10,6 +10,7 @@ import dev.antigravity.mazeward.tower.TowerKind;
 import dev.antigravity.mazeward.world.Palette;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.minestom.server.block.Block;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.instance.Instance;
 
@@ -48,6 +49,9 @@ public final class Island extends Battlefield {
         recomputePaths();
         owner.deck().resetForStage(match.random());
         owner.deck().drawToHandSize(match.startHand());
+        
+        // マルチプレイ時にチーム色で島の周辺を装飾
+        paintTeamColorFrame(grid, owner);
     }
 
     public VersusPlayer owner() {
@@ -192,5 +196,55 @@ public final class Island extends Battlefield {
      */
     public boolean grantCard(int handLimit, java.util.Random random) {
         return owner.deck().drawOne(handLimit, random);
+    }
+
+    /**
+     * 島の周辺をプレイヤーのチーム色で装飾する。
+     * マルチプレイで各プレイヤーの島を視覚的に区別できるようにする。
+     */
+    private void paintTeamColorFrame(Grid grid, VersusPlayer owner) {
+        if (owner.teamColor() == null) {
+            return; // チーム色が未設定の場合はスキップ
+        }
+
+        // チーム色に対応したウール（羊毛）ブロックを取得
+        Block teamBlock = getWoolBlockForColor(owner.teamColor());
+        if (teamBlock == null) {
+            return;
+        }
+
+        // 島の周辺（枠）に色付きブロックを配置
+        int margin = 1; // 島の外枠1マスに色付きブロックを配置
+        int width = grid.width();
+        int height = grid.height();
+
+        // 上下の辺
+        for (int x = -margin; x < width + margin; x++) {
+            arena.instance.setBlock(arena.originX + x, Battlefield.FLOOR_Y - 1, arena.originZ - margin, teamBlock);
+            arena.instance.setBlock(arena.originX + x, Battlefield.FLOOR_Y - 1, arena.originZ + height + margin - 1, teamBlock);
+        }
+
+        // 左右の辺
+        for (int z = 0; z < height; z++) {
+            arena.instance.setBlock(arena.originX - margin, Battlefield.FLOOR_Y - 1, arena.originZ + z, teamBlock);
+            arena.instance.setBlock(arena.originX + width + margin - 1, Battlefield.FLOOR_Y - 1, arena.originZ + z, teamBlock);
+        }
+    }
+
+    /**
+     * NamedTextColor に対応したウール（羊毛）ブロックを返す。
+     */
+    private Block getWoolBlockForColor(NamedTextColor color) {
+        return switch (color) {
+            case RED -> Block.RED_WOOL;
+            case BLUE -> Block.BLUE_WOOL;
+            case GREEN -> Block.GREEN_WOOL;
+            case YELLOW -> Block.YELLOW_WOOL;
+            case LIGHT_PURPLE -> Block.MAGENTA_WOOL;
+            case AQUA -> Block.CYAN_WOOL;
+            case GOLD -> Block.ORANGE_WOOL;
+            case DARK_AQUA -> Block.LIGHT_BLUE_WOOL;
+            default -> Block.WHITE_WOOL;
+        };
     }
 }
