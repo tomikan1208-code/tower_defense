@@ -460,7 +460,11 @@ public abstract class Battlefield {
                     continue;
                 }
                 if (heals) {
-                    target.heal(source.kind().healPerSecond());
+                    // 回復量は定額だが、対戦の送りは HP が桁で違う。
+                    // 最大 HP の 1.5%/秒 を下限にしておかないと、
+                    // 上の段ではただの「柔らかい的」になってしまう
+                    target.heal(Math.max(source.kind().healPerSecond(),
+                            target.maxHp() * 0.015));
                 } else {
                     // 次のオーラ tick まで少しだけ余裕を持たせる
                     target.applyWard(trait.wardReduction(), HEAL_INTERVAL + 5);
@@ -489,11 +493,22 @@ public abstract class Battlefield {
                 if (distanceFromTower(tower, pos) > trait.disableRadius()) {
                     continue;
                 }
-                tower.disable(trait.disableTicks());
+                Pos over = new Pos(towerWorldX(tower),
+                        ArenaRenderer.WALL_TOP_Y + 0.9, towerWorldZ(tower));
+
+                // 監視塔の傘の下は弾く。守られたことが見えないと、
+                // 「効いていないのか、そもそも狙われていないのか」が分からない
+                if (tower.disableImmune()) {
+                    Overlay.drawBurst(players, over, Particle.END_ROD, 4, 0.25f);
+                    continue;
+                }
+                int ticks = (int) Math.round(trait.disableTicks() * (1.0 - tower.disableResist()));
+                if (ticks <= 0) {
+                    continue;
+                }
+                tower.disable(ticks);
                 any = true;
-                Overlay.drawBurst(players,
-                        new Pos(towerWorldX(tower), ArenaRenderer.WALL_TOP_Y + 0.9, towerWorldZ(tower)),
-                        Particle.LARGE_SMOKE, 3, 0.25f);
+                Overlay.drawBurst(players, over, Particle.LARGE_SMOKE, 3, 0.25f);
             }
             if (any) {
                 playSound(SoundEvent.BLOCK_FIRE_EXTINGUISH, 0.35f, 0.6f);
@@ -749,12 +764,9 @@ public abstract class Battlefield {
     protected void recomputeSupport() {
         double rangeBonus = modifiers().rangeBonus();
         for (TowerInstance tower : towers) {
-            if (tower.kind().passive()) {
-                tower.setBoost(0, 0);
-                continue;
-            }
             double damage = 0;
             double rate = 0;
+            double resist = 0;
             for (TowerInstance source : towers) {
                 if (source == tower || !source.kind().passive()) {
                     continue;
@@ -763,10 +775,20 @@ public abstract class Battlefield {
                 if (tower.distanceTo(source.centerX(), source.centerZ()) > stats.range() + rangeBonus) {
                     continue;
                 }
+                // 火力の上乗せは足し合わせる。監視塔を増やした甲斐が要るので
                 damage += stats.effect().boostDamage();
                 rate += stats.effect().boostRate();
+                // 妨害の傘だけは <b>いちばん厚い 1 枚</b> を採る。
+                // 足し合わせると監視塔を 2 つ並べるだけで無効化に届いてしまい、
+                // 「無効化は特化でしか手に入らない」という段取りが消える
+                resist = Math.max(resist, stats.effect().disableResist());
             }
-            tower.setBoost(damage, Math.min(0.6, rate));
+            // 監視塔どうしは強化し合わないが、傘には入れる。
+            // 監視塔だけ狙って黙らせれば傘が剥がれる、という抜け道を作らないため。
+            // （自分の傘には入らないが、黙らされても支援そのものは止まらないので実害はない）
+            tower.setBoost(tower.kind().passive() ? 0 : damage,
+                    tower.kind().passive() ? 0 : Math.min(0.6, rate));
+            tower.setDisableResist(resist);
         }
     }
 
@@ -1323,7 +1345,8 @@ public abstract class Battlefield {
         }
         wallet().spend(kind.baseCost());
 
-        TowerInstance tower = new TowerInstance(kind, origin, rot, kind.baseCost());
+        TowerInstance tower = new TowerInstance(kind, origin, rot, kind.baseCost(),
+                modifiers().maxTowerLevel());
         towers.add(tower);
         for (Vec2i cell : tower.footprint()) {
             towerByCell.put(cell, tower);

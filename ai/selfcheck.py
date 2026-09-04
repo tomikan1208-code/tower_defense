@@ -30,6 +30,7 @@ from mazeward_env import pathfinder as pf               # noqa: E402
 from mazeward_env.bots_heuristic import empty_action, make_bot  # noqa: E402
 from mazeward_env.combat import ENEMY_INDEX             # noqa: E402
 from mazeward_env.env import VersusEnv                  # noqa: E402
+from mazeward_env import reward as R                    # noqa: E402
 from mazeward_env.grid import (OPEN, ROCK, SPAWN, WALL, Grid,   # noqa: E402
                                generate_board)
 from mazeward_env.rules import EnvConfig                # noqa: E402
@@ -154,12 +155,19 @@ def check_combat() -> None:
     bd2.tw_z[0, slot] = placed[1] + 0.5
     bd2.tw_count[0] = 1
     bd2.tw_cells[0][slot] = np.array([[placed[0], placed[1]]], dtype=np.int32)
+    # 最大レベルで測る。低レベルだと、走狗が射程 5.5 を抜けるまでに倒し切れず
+    # 「漏れるまでの時間」を測ってしまい、式の検証にならない
+    # （2 人戦では送りの耐力が 5 倍に正規化されるので、なおさら火力が要る）
+    bd2.tw_level[0, slot] = B.MAX_TOWER_LEVEL
     bd2.refresh_tower_stats()
     bd2.tw_charge[0, slot] = bd2._st_cooldown[0, slot]
 
-    st = B.stats_at("ARROW", 0)
+    st = B.stats_at("ARROW", B.MAX_TOWER_LEVEL)
     per_hit = max(B.MIN_DAMAGE_AFTER_ARMOR, st.damage - B.ENEMIES["GRUNT"].armor)
-    hits = math.ceil(B.ATTACKERS["WHELP"].hp / per_hit)
+    # 2 人戦なので相手は 1 人。送りの耐力は人数で正規化される
+    # (VersusMatch#sendPowerScale)
+    spawn_hp = B.ATTACKERS["WHELP"].hp * B.send_power_scale(1)
+    hits = math.ceil(spawn_hp / per_hit)
     # Java は cooldown=0 の塔が即撃つので、n 発目は (n-1)*cooldown tick 目
     expect_ticks = (hits - 1) * st.cooldown
 
@@ -170,11 +178,13 @@ def check_combat() -> None:
         bd2.advance(4, 4, np.zeros(env2.n, bool))
         ticks += 4
     approx(ticks, expect_ticks, 8,
-           f"弓塔 Lv1 が走狗を倒すまでの tick（{hits} 発 x cd {st.cooldown}）")
+           f"弓塔 Lv{B.MAX_TOWER_LEVEL + 1} が走狗を倒すまでの tick"
+           f"（{hits} 発 x cd {st.cooldown}）")
     check(bd2.stat_kills[0] == 1, "撃破が 1 件記録される")
-    reward = B.ATTACKERS["WHELP"].kill_reward
+    # 2 人戦なので相手は 1 人。総量 40% がそのまま 1 人ぶんの報酬になる
+    reward = B.ATTACKERS["WHELP"].kill_reward(1)
     approx(float(bd2.coins[0]) - coins_before, reward, 0.01,
-           f"撃破報酬 = 送りコストの 20% = {reward} コイン")
+           f"撃破報酬 = 送りコストの {B.KILL_REWARD_TOTAL:.0%} = {reward} コイン")
 
     # --- 装甲は固定引き算で先に効く ---
     brute = B.ENEMIES["BRUTE"]
@@ -188,20 +198,38 @@ def check_combat() -> None:
 def check_economy() -> None:
     print("\n■ 経済")
     eco = B.ECONOMY
-    check(eco.income_interval_for(2) == 100,
-          "2 人戦の収入間隔は 5 秒（少人数ほど速い）")
-    check(eco.income_interval_for(7) == 200, "7 人以上で基準の 10 秒")
-    check(eco.income_interval_for(8) == 200, "8 人でも 10 秒で頭打ち")
+    check(eco.income_interval_for(2) == 200, "2 人戦でも収入間隔は 10 秒")
+    check(eco.income_interval_for(8) == 200, "8 人戦でも 10 秒（人数によらず一定）")
+
+    # 1 回の送りが盤面に返す総量は人数によらず一定。
+    # ここが崩れると 6 人以上で送りが黒字になり、コインが雪だるま式に膨らむ
+    for players in (2, 4, 6, 8):
+        opponents = players - 1
+        whelp = B.ATTACKERS["BULWARK"]
+        world = whelp.kill_reward(opponents) * opponents
+        approx(world / whelp.cost, B.KILL_REWARD_TOTAL, 0.05,
+               f"{players} 人戦で世界全体に返るコインは コストの {B.KILL_REWARD_TOTAL:.0%}")
+
+    # 梯子は等比で、インカム比率は上ほど下がる（雪だるまの自然な減速）
+    econ = [B.ATTACKERS[k] for k in B.ATTACKER_ORDER
+            if B.ATTACKERS[k].income_gain > 0]
+    check(all(econ[i].cost < econ[i + 1].cost for i in range(len(econ) - 1)),
+          "インカムモブは安い順に並んでいる")
+    check(econ[0].income_ratio > econ[-1].income_ratio * 2.0,
+          f"インカム比率は上ほど下がる（{econ[0].income_ratio:.1%} → "
+          f"{econ[-1].income_ratio:.1%}）")
+    check(all(B.ATTACKERS[k].stock_cost == 1 for k in B.ATTACKER_ORDER),
+          "ストック消費はどれも 1（回数制限であって強さの値付けではない）")
 
     env = VersusEnv(EnvConfig(num_envs=1, players_choices=(2,), board_size=21,
                               seed=3, max_ticks=20 * 60 * 20))
     bd = env.boards
     start = float(bd.coins[0])
     action = empty_action(env.n)
-    for _ in range(6):                       # 6 秒ぶん（= 収入 1 回）
+    for _ in range(11):                      # 11 秒ぶん（= 収入 1 回）
         env.step(action)
     check(float(bd.coins[0]) >= start + eco.start_income,
-          f"5 秒ごとに インカム {eco.start_income} ぶんのコインが入る")
+          f"10 秒ごとに インカム {eco.start_income} ぶんのコインが入る")
 
     # ストックは毎秒 1 回復し、上限で止まる
     bd.stock[0] = 0.0
@@ -236,7 +264,9 @@ def check_abilities() -> None:
     check((bd.en_body[0, :int(bd.en_count[0])] == splitling).any(),
           "湧いた子は分裂片になっている")
 
-    # --- 復活: 終焉騎は倒れても戻り、ライフ上限を奪う ---
+    # --- 終焉騎: 倒せば無傷、通せばライフ上限を奪われる ---
+    # ここが「倒したときに奪う」だった頃は、防衛に正解が存在しなかった。
+    # 上限を奪うのはコアまで通されたときだけ (Island#onEnemyLeaked)
     env2 = VersusEnv(EnvConfig(num_envs=1, players_choices=(2,), board_size=21,
                                seed=12, max_ticks=20 * 60 * 20))
     bd2 = env2.boards
@@ -246,9 +276,18 @@ def check_abilities() -> None:
     max_before = float(bd2.max_lives[0])
     bd2.en_hp[0, idx] = 0.0       # 死亡判定は hp <= 0
     bd2.advance(4, 4, np.zeros(env2.n, bool))
-    check(float(bd2.max_lives[0]) == max_before - 1,
-          "終焉騎が倒れるとライフ上限が 1 減る（取り返しがつかない）")
+    check(float(bd2.max_lives[0]) == max_before,
+          "終焉騎を倒してもライフ上限は減らない（守り切れば無傷）")
     check(bd2.en_alive[0, idx], "終焉騎は消えずに出発点へ戻る")
+
+    # 2 周目を通す
+    bd2.en_hp[0, idx] = 1.0
+    bd2.en_progress[0, idx] = bd2.path_total()[0, idx] + 1.0
+    lives_before = float(bd2.lives[0])
+    bd2.advance(4, 4, np.zeros(env2.n, bool))
+    check(float(bd2.max_lives[0]) == max_before - 1,
+          "終焉騎をコアまで通すとライフ上限が 1 減る（取り返しがつかない）")
+    check(float(bd2.lives[0]) <= lives_before - 1, "通されれば現在ライフも減る")
 
     # --- 不燃: 熱塊は燃えない ---
     env3 = VersusEnv(EnvConfig(num_envs=1, players_choices=(2,), board_size=21,
@@ -272,9 +311,64 @@ def check_abilities() -> None:
     # --- 妨害: タワーを黙らせる ---
     check(B.ENEMIES["SAPPER"].trait.disable_ticks == 40,
           "妨害者はタワーを 2 秒黙らせる")
+    check_watch_umbrella()
     # --- 瞬移 ---
     check(B.ENEMIES["BLINKER"].trait.blink_radius == 5.0,
           "瞬移体は半径 5.0 の中で最もコア寄りの経路へ跳ぶ")
+
+
+def check_watch_umbrella() -> None:
+    """監視塔の傘が **この環境でも** 効いているかを、状態配列を直接見て確かめる。
+
+    妨害者への対策が「散らして置く」しかないと構成が 1 つに収束するので、
+    監視塔の下だけは固めてよい、という逃げ道になっている
+    (Battlefield#recomputeSupport / #applyDisablers)。
+    ここが Java とずれると、学習は実ゲームに無い盤面を最適化してしまう。
+    """
+    from mazeward_env.combat import BalanceTables, Boards
+
+    bal = B.default_balance()
+    boards = Boards(1, np.zeros(1, dtype=np.int64), BalanceTables([bal]),
+                    bal.board.size, bal.board.spawns)
+    watch = B.TOWER_ORDER.index("WATCHTOWER")
+    arrow = B.TOWER_ORDER.index("ARROW")
+
+    def place(slot, kind, x, z, level=0, spec=0):
+        # tw_spec は 0 = 未選択 / 1 = 特化A / 2 = 特化B
+        boards.tw_kind[0, slot] = kind
+        boards.tw_x[0, slot] = x
+        boards.tw_z[0, slot] = z
+        boards.tw_level[0, slot] = level
+        boards.tw_spec[0, slot] = spec
+
+    def umbrella(*towers):
+        boards.tw_kind[0, :] = -1
+        place(0, arrow, 5.0, 5.0)
+        for i, args in enumerate(towers):
+            place(i + 1, watch, *args)
+        boards.recompute_support()
+        return float(boards.tw_disable_resist[0, 0])
+
+    top = B.MAX_TOWER_LEVEL
+    check(abs(umbrella((6.0, 5.0)) - 0.5) < 1e-6,
+          "監視塔の傘は妨害を半減する")
+    check(umbrella((6.0, 5.0, top, 1)) >= 1.0 and umbrella((6.0, 5.0, top, 2)) >= 1.0,
+          "特化した監視塔は妨害を完全に無効化する（A/B どちらでも）")
+    check(abs(umbrella((6.0, 5.0), (4.0, 5.0)) - 0.5) < 1e-6,
+          "傘は重ねても厚くならない（並べるだけでは無効化に届かない）")
+    check(umbrella((40.0, 40.0)) == 0.0,
+          "射程の外の監視塔は守らない")
+
+    # 監視塔も傘の受け手に含む（ただし自分の傘には入らない）。
+    # 妨害者に黙らされても支援そのものは止まらないので、自分を守れなくても実害はないが、
+    # 2 つ並べたときに互いを守れないと「監視塔だけ狙われる」抜け道になる
+    boards.tw_kind[0, :] = -1
+    place(0, arrow, 5.0, 5.0)
+    place(1, watch, 6.0, 5.0)
+    place(2, watch, 4.0, 5.0)
+    boards.recompute_support()
+    check(abs(float(boards.tw_disable_resist[0, 1]) - 0.5) < 1e-6,
+          "監視塔どうしは互いを傘に入れる")
 
 
 def check_leak_reward() -> None:
@@ -350,6 +444,58 @@ def check_leak_reward() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
+def check_reward_shaping() -> None:
+    """整形報酬が **有界** で、割引和が端点だけで決まることを確かめる。
+
+    旧報酬はここが壊れていた（獲得コインを毎ステップ足していたので、
+    1 試合で +29.6 貯まり、勝敗の ±1.0 を 30 倍で上回っていた）。
+    同じ壊れ方を二度としないための検査なので、**数値ではなく性質**を見る。
+    """
+    print("\n■ 報酬（ポテンシャル整形）")
+    cfg = EnvConfig(num_envs=4, players_choices=(2,), board_size=21,
+                    max_ticks=20 * 60 * 15, seed=5)
+    env = VersusEnv(cfg)
+    seats = np.array([e * env.seats for e in range(env.n_envs)])
+    others = seats + 1
+    defender, pusher = make_bot("greedy_defense"), make_bot("income_push")
+
+    obs = env.reset()
+    gamma = R.GAMMA
+    phi0 = env._prev_phi[seats].astype(np.float64)
+    phi_t = phi0.copy()
+    discounted = np.zeros(len(seats))
+    steps = 0
+    for t in range(int(cfg.max_ticks // cfg.decision_ticks)):
+        action = empty_action(env.n)
+        defender.act(env, obs, seats, action)
+        pusher.act(env, obs, others, action)
+        before = env._prev_phi[seats].astype(np.float64)
+        obs, _, done, _ = env.step(action)
+        if done.any():
+            # 試合が切り替わると Φ が新しい盤面のものに差し替わるので、
+            # ここまでで打ち切る（端点が繋がらない）
+            break
+        phi_t = env._prev_phi[seats].astype(np.float64)
+        discounted += (gamma ** t) * (gamma * phi_t - before)
+        steps += 1
+
+    expected = gamma ** steps * phi_t - phi0
+    approx(float(np.abs(discounted - expected).max()), 0.0, 1e-3,
+           f"整形の割引和が γ^T Φ_T − Φ_0 と一致する（{steps} ステップ）")
+    check(bool(np.abs(env._prev_phi).max() <= 1.0),
+          "Φ が [-1, 1] に収まっている")
+
+    # 同じ盤面を往復しても稼げないこと。ライフを削って戻す往復を Φ で再現する
+    life = np.array([1.0, 0.5, 1.0, 0.5], dtype=np.float32)
+    opp = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    flat = np.zeros(4, dtype=np.float32)
+    there = R.potential(life, opp, flat, flat, flat, flat, flat, flat)
+    back = R.potential(opp, opp, flat, flat, flat, flat, flat, flat)
+    round_trip = R.shaping(back, there) + R.shaping(there, back)
+    check(bool(np.abs(round_trip).max() < 2e-3),
+          "ライフを奪って戻す往復で整形が積み上がらない")
+
+
 def check_invariants() -> None:
     print("\n■ 不変条件（実戦を回して毎ステップ確認）")
     rng = np.random.default_rng(5)
@@ -423,6 +569,7 @@ def main() -> int:
     check_economy()
     check_abilities()
     check_leak_reward()
+    check_reward_shaping()
     check_invariants()
     sample_board()
 

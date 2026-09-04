@@ -848,7 +848,8 @@ public final class SelfCheck {
                             && trait.burnResist() <= 1.0,
                     kind + " の能力の値が範囲外");
         }
-        assertTrue(withTrait == 6, "能力持ちの敵が 6 種ではない（" + withTrait + " 種）");
+        // 6 種 + 上位種の破城者・大分裂体（下位と同じ能力を使い回している）
+        assertTrue(withTrait == 8, "能力持ちの敵が 8 種ではない（" + withTrait + " 種）");
 
         // 熱塊は燃えない・凍らない。炎氷偏重を咎める役なので、両方効かないことが要る
         Trait ember = EnemyKind.EMBERLING.trait();
@@ -873,6 +874,19 @@ public final class SelfCheck {
         assertTrue(TowerKind.BANISHER.statsAt(0).effect().banishTargets() >= 1,
                 "送還塔が誰も送り返さない");
 
+        // 監視塔の傘。妨害者への対策が「散らして置く」しかないと、構成が 1 つに収束する
+        double umbrella = TowerKind.WATCHTOWER.statsAt(0).effect().disableResist();
+        assertTrue(umbrella > 0 && umbrella < 1.0,
+                "監視塔の傘が半減になっていない: " + umbrella);
+        assertTrue(TowerKind.WATCHTOWER.statsAt(TowerKind.MAX_LEVEL).effect().disableResist()
+                        == umbrella,
+                "傘がレベルで伸びている。特化の前に無効化へ届いてしまう");
+        for (TowerKind.Spec spec : TowerKind.WATCHTOWER.specs()) {
+            assertTrue(TowerKind.WATCHTOWER.statsAt(TowerKind.MAX_LEVEL, spec)
+                            .effect().disableResist() >= 1.0,
+                    "特化 " + spec.displayName() + " で妨害を無効化できていない");
+        }
+
         // 監視塔は自分では撃たない
         assertTrue(TowerKind.WATCHTOWER.passive(), "監視塔が支援扱いになっていない");
         assertTrue(TowerKind.WATCHTOWER.statsAt(0).effect().boostDamage() > 0,
@@ -880,6 +894,7 @@ public final class SelfCheck {
 
         System.out.printf("  能力持ち %d 種 / 呪詛 +%.0f%% > 庇護 -%.0f%% / 送還 %.0f 秒に 1 度%n",
                 withTrait, curse * 100, ward * 100, banishCooldown / 20.0);
+        System.out.printf("  監視塔の傘: 妨害 -%.0f%% → 特化で無効化%n", umbrella * 100);
 
         printEnemyTable();
         checkDamagePipeline();

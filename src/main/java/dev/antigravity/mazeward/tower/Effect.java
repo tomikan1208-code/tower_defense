@@ -20,9 +20,11 @@ public record Effect(
         /** 監視: 周囲のタワーの攻撃力の上乗せ率。 */
         double boostDamage,
         /** 監視: 周囲のタワーのクールダウン短縮率。 */
-        double boostRate) {
+        double boostRate,
+        /** 監視: 周囲のタワーが受ける妨害の軽減率。1.0 なら完全に無効。 */
+        double disableResist) {
 
-    public static final Effect NONE = new Effect(0, 0, 0, 0, 0);
+    public static final Effect NONE = new Effect(0, 0, 0, 0, 0, 0);
 
     /**
      * 出発点へ送り返す。
@@ -35,19 +37,33 @@ public record Effect(
      * @param targets 一度に送り返す敵の数
      */
     public static Effect banish(int targets) {
-        return new Effect(targets, 0, 0, 0, 0);
+        return new Effect(targets, 0, 0, 0, 0, 0);
     }
 
     public static Effect curse(double vulnerability, int ticks) {
-        return new Effect(0, vulnerability, ticks, 0, 0);
+        return new Effect(0, vulnerability, ticks, 0, 0, 0);
     }
 
     public static Effect watch(double boostDamage, double boostRate) {
-        return new Effect(0, 0, 0, boostDamage, boostRate);
+        return watch(boostDamage, boostRate, 0);
+    }
+
+    /**
+     * 監視の傘。数字を上げるだけでなく、<b>妨害者から守る</b>。
+     *
+     * <p>妨害者（クリーパー）は火力を 1 箇所に固めるほどまとめて黙らせてくる。
+     * その対策が「散らして置く」しかないと、結局どの構成も同じ形に収束する。
+     * 監視塔の傘の下だけは固めてよい、という逃げ道を作るための効果。</p>
+     *
+     * @param disableResist 妨害の軽減率。0.5 で半減、1.0 で完全無効
+     */
+    public static Effect watch(double boostDamage, double boostRate, double disableResist) {
+        return new Effect(0, 0, 0, boostDamage, boostRate, disableResist);
     }
 
     public boolean empty() {
-        return banishTargets <= 0 && vulnerability <= 0 && boostDamage <= 0 && boostRate <= 0;
+        return banishTargets <= 0 && vulnerability <= 0
+                && boostDamage <= 0 && boostRate <= 0 && disableResist <= 0;
     }
 
     /** 特化で上乗せするときに使う。 */
@@ -57,6 +73,7 @@ public record Effect(
                 vulnerability + other.vulnerability,
                 Math.max(vulnerabilityTicks, other.vulnerabilityTicks),
                 boostDamage + other.boostDamage,
-                boostRate + other.boostRate);
+                boostRate + other.boostRate,
+                Math.min(1.0, disableResist + other.disableResist));
     }
 }

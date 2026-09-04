@@ -520,6 +520,14 @@ public final class PlayerSession {
                             tower.boostDamage() * 100, tower.boostRate() * 100),
                     NamedTextColor.AQUA));
         }
+        if (tower.disableImmune()) {
+            text = text.append(Component.newline())
+                    .append(Component.text("監視塔の傘: 妨害を無効化", NamedTextColor.AQUA));
+        } else if (tower.disableResist() > 0) {
+            text = text.append(Component.newline()).append(Component.text(
+                    String.format("監視塔の傘: 妨害 -%.0f%%", tower.disableResist() * 100),
+                    NamedTextColor.AQUA));
+        }
         if (tower.disabled()) {
             text = text.append(Component.newline())
                     .append(Component.text("妨害されて停止中", NamedTextColor.RED));

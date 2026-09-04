@@ -114,6 +114,7 @@ class BalanceTables:
         self.tw_burn, self.tw_burn_ticks = f(), f()
         self.tw_banish, self.tw_vuln, self.tw_vuln_ticks = f(), f(), f()
         self.tw_boost_dmg, self.tw_boost_rate = f(), f()
+        self.tw_resist = f()
         self.tw_chain = np.zeros(shape, dtype=np.int32)
 
         self.tw_cost = np.zeros((n, N_TOWER), dtype=np.int32)
@@ -147,6 +148,7 @@ class BalanceTables:
                         self.tw_vuln_ticks[e, k, lv, sp] = st.effect.vulnerability_ticks
                         self.tw_boost_dmg[e, k, lv, sp] = st.effect.boost_damage
                         self.tw_boost_rate[e, k, lv, sp] = st.effect.boost_rate
+                        self.tw_resist[e, k, lv, sp] = st.effect.disable_resist
 
         self.tw_style = np.array([STYLE_ID[B.TOWERS[k].style]
                                   for k in B.TOWER_ORDER], dtype=np.int32)
@@ -160,7 +162,9 @@ class BalanceTables:
         self.at_stock = np.zeros((n, N_ATTACK), dtype=np.int32)
         self.at_unlock = np.zeros((n, N_ATTACK), dtype=np.int32)
         self.at_hp = np.zeros((n, N_ATTACK), dtype=np.float32)
-        self.at_reward = np.zeros((n, N_ATTACK), dtype=np.int32)
+        # **報酬は総量で持つ。** 1 体あたりの額は「何人に湧いたか」で割って決まるので、
+        # ここで確定させられない (AttackerKind#killReward)
+        self.at_reward_total = np.zeros((n, N_ATTACK), dtype=np.float32)
         for e, bal in enumerate(balances):
             for a, key in enumerate(B.ATTACKER_ORDER):
                 d = bal.attackers[key]
@@ -169,7 +173,7 @@ class BalanceTables:
                 self.at_stock[e, a] = d.stock_cost
                 self.at_unlock[e, a] = d.unlock_income
                 self.at_hp[e, a] = d.hp
-                self.at_reward[e, a] = bal.kill_reward(key)
+                self.at_reward_total[e, a] = d.cost * B.KILL_REWARD_TOTAL
         self.at_body = np.array([ENEMY_INDEX[B.ATTACKERS[k].body]
                                  for k in B.ATTACKER_ORDER], dtype=np.int32)
 
@@ -200,6 +204,12 @@ class BalanceTables:
         self.en_split = trait(lambda d: d.trait.split_count, np.int32)
         self.en_burn_resist = trait(lambda d: d.trait.burn_resist)
         self.en_revives = trait(lambda d: d.trait.revives, np.int32)
+        # **コアまで通されたときにだけ**ライフ上限を奪う体 (balance.MAX_LIFE_STEALERS)
+        self.en_steals_max_life = np.array(
+            [B.ATTACKERS[k].body for k in B.MAX_LIFE_STEALERS
+             if k in B.ATTACKERS], dtype=object)
+        self.en_steals_max_life = np.array(
+            [k in set(self.en_steals_max_life) for k in ENEMY_ORDER], dtype=bool)
 
         # --- 経済 ---
         def eco(fn, dtype=np.int32):
@@ -212,9 +222,6 @@ class BalanceTables:
         self.max_towers = eco(lambda c: c.max_towers)
         self.prep_ticks = eco(lambda c: c.prep_ticks)
         self.income_interval = eco(lambda c: c.income_interval)
-        self.min_income_interval = eco(lambda c: c.min_income_interval)
-        self.full_lobby = eco(lambda c: c.full_lobby)
-        self.income_step = eco(lambda c: c.income_step_per_player)
         self.stock_interval = eco(lambda c: c.stock_interval)
         self.sudden_death = eco(lambda c: c.sudden_death_ticks)
         self.card_interval = eco(lambda c: c.card_interval)
@@ -256,6 +263,7 @@ class Boards:
         self.tw_disabled = z(n_boards, T)      # 妨害されている残り tick
         self.tw_boost_dmg = z(n_boards, T)
         self.tw_boost_rate = z(n_boards, T)
+        self.tw_disable_resist = z(n_boards, T)   # 監視塔の傘（妨害の軽減率）
         self.tw_count = zi(n_boards)
         #: 塔が乗っているセル（売却で戻すため）。可変長なので Python 側で持つ
         self.tw_cells: List[List[Optional[np.ndarray]]] = [
@@ -277,6 +285,20 @@ class Boards:
         self._st_style = np.full((n_boards, T), -1, dtype=np.int32)
         self._st_target = np.full((n_boards, T), TGT_NONE, dtype=np.int32)
 
+        # --- 湧かせ待ち行列（まとめ送り用）---
+        #
+        # **まとめて送られたぶんを同座標に一度に湧かせてはいけない。**
+        # 範囲攻撃と連鎖が 1 塊に当たるので、実際より柔らかく見える。
+        # 戦闘サブステップ 1 回（COMBAT_DT = 4 tick = 0.2 秒）につき
+        # 1 体ずつ出すことで、人間が送りメニューを連打したのと同じ間隔になる。
+        #
+        # 幅は「1 回の意思決定で同じ島へ送ってくる相手の最大数」＝ 席数 - 1。
+        # 余裕を見て MAX_PLAYERS 分だけ確保する（1 島あたり 8 スロット）。
+        self.pend_kind = np.full((n_boards, B.MAX_PLAYERS), -1, dtype=np.int32)
+        self.pend_sender = np.full((n_boards, B.MAX_PLAYERS), -1, dtype=np.int32)
+        self.pend_left = np.zeros((n_boards, B.MAX_PLAYERS), dtype=np.int32)
+        self.pend_spawn = np.zeros((n_boards, B.MAX_PLAYERS), dtype=np.int32)
+
         # --- 敵 ---
         self.en_alive = np.zeros((n_boards, E), dtype=bool)
         self.en_body = np.full((n_boards, E), -1, dtype=np.int32)
@@ -288,6 +310,10 @@ class Boards:
         self.en_slot = zi(n_boards, E)         # 経路スロット = spawn + S*flying
         self.en_slow_ticks, self.en_slow = z(n_boards, E), z(n_boards, E)
         self.en_burn_ticks, self.en_burn = z(n_boards, E), z(n_boards, E)
+        #: 燃焼を付けた塔の種類。継続ダメージの功績をそこへ返すため
+        self.en_burn_src = np.full((n_boards, E), -1, dtype=np.int32)
+        #: 最後に当てた塔の種類。撃破をどの種類の手柄にするか
+        self.en_last_hit_kind = np.full((n_boards, E), -1, dtype=np.int32)
         self.en_vuln_ticks, self.en_vuln = z(n_boards, E), z(n_boards, E)
         self.en_ward_ticks, self.en_ward = z(n_boards, E), z(n_boards, E)
         self.en_blink_cd = z(n_boards, E)
@@ -318,11 +344,24 @@ class Boards:
         self.stat_leaks = zi(n_boards)
         self.stat_kills = zi(n_boards)
         self.stat_coins_earned = z(n_boards)
-        self.stat_idle_slots = z(n_boards)   # 射程内に敵がいない塔の延べ数
-        self.stat_tower_slots = z(n_boards)  # 塔の延べ数（割る側）
+        #: 敵がいるのに射程内へ来なかった塔の延べ数（敵がいない時間は数えない）
+        self.stat_idle_slots = z(n_boards)
+        #: 上の分母。敵がいるサブステップの塔の延べ数
+        self.stat_tower_slots = z(n_boards)
         self.stat_max_life_lost = z(n_boards)
         self.stat_life_regained = z(n_boards)  # 送りが通って取り戻したライフ
         self.stat_breakthrough = z(n_boards)   # 送りが相手のコアに届いた回数
+        #: この島に湧かせようとした敵の数と、**上限で捨てた**数。
+        #: 捨てた敵は漏れないので、数えないと守りが強く見える
+        self.stat_spawn_asked = z(n_boards)
+        self.stat_spawn_dropped = z(n_boards)
+        #: **塔の種類ごとの与ダメージ功績。** バランス判断の本命。
+        #: 範囲・連鎖・貫通・送還・燃焼の巻き添えぶんも全部ここに入る。
+        #: 監視塔のバフと呪詛塔のデバフで増えたぶんは、撃った塔ではなく
+        #: **バフ / デバフを出した塔の功績**として振り分ける
+        self.stat_damage_by_kind = np.zeros((n_boards, N_TOWER), dtype=np.float32)
+        #: 種類ごとの撃破数（とどめを刺した塔）
+        self.stat_kills_by_kind = np.zeros((n_boards, N_TOWER), dtype=np.float32)
 
     # ---------------------------------------------------------------- 経路
     def set_path(self, board: int, slot: int,
@@ -462,6 +501,18 @@ class Boards:
         self._st_banish = t.tw_banish[env, kind, lv, sp]
         self._st_vuln = t.tw_vuln[env, kind, lv, sp]
         self._st_vuln_ticks = t.tw_vuln_ticks[env, kind, lv, sp]
+        # 素の（バフを受けていない）性能。功績を分けるときの分母になる
+        self._st_damage_raw = t.tw_damage[env, kind, lv, sp]
+        self._st_cooldown_raw = np.maximum(B.MIN_COOLDOWN,
+                                           t.tw_cooldown[env, kind, lv, sp])
+        # 「バフを出しているのは誰か」「デバフを出しているのは誰か」を
+        # 種類ごとの比率にしておく。功績はここに沿って返す
+        self._credit_boost = self._supply_share(live, kind,
+                                                t.tw_boost_dmg[env, kind, lv, sp]
+                                                + t.tw_boost_rate[env, kind, lv, sp])
+        self._credit_vuln = self._supply_share(live, kind,
+                                               t.tw_vuln[env, kind, lv, sp])
+
         self._st_style = np.where(live, t.tw_style[kind], -1)
         self._st_target = np.where(live, t.tw_target[kind], TGT_NONE)
 
@@ -485,6 +536,7 @@ class Boards:
         src_range = t.tw_range[env, kind, lv, sp]
         src_dmg = t.tw_boost_dmg[env, kind, lv, sp]
         src_rate = t.tw_boost_rate[env, kind, lv, sp]
+        src_resist = t.tw_resist[env, kind, lv, sp]
 
         x, z = self.tw_x[sel], self.tw_z[sel]
         d = np.sqrt((x[:, :, None] - x[:, None, :]) ** 2
@@ -497,6 +549,11 @@ class Boards:
         self.tw_boost_rate[sel] = np.where(
             receives, np.minimum((gives * src_rate[:, None, :]).sum(axis=2),
                                  B.SUPPORT_RATE_CAP), 0.0)
+        # 妨害の傘だけは足さずに「いちばん厚い 1 枚」を採る。
+        # 足すと監視塔を 2 つ並べるだけで無効化に届き、特化を選ぶ意味が消える。
+        # 受け手は監視塔自身も含む（真っ先に黙らされるようでは対策にならない）
+        self.tw_disable_resist[sel] = np.where(
+            live, (gives * src_resist[:, None, :]).max(axis=2), 0.0)
 
     # ---------------------------------------------------------------- 敵の投入
     def spawn(self, boards: np.ndarray, attacker: np.ndarray,
@@ -514,6 +571,11 @@ class Boards:
             return
         slots = alloc_slots(self.en_count, boards)
         ok = slots < self.max_enemies
+        np.add.at(self.stat_spawn_asked, boards, 1.0)
+        np.add.at(self.stat_spawn_dropped, boards[~ok], 1.0)
+        if getattr(self, "env_ref", None) is not None:
+            np.add.at(self.env_ref.stat_spawned_by_kind,
+                      (boards, attacker.astype(np.int64)), 1.0)
         boards, attacker, slots = boards[ok], attacker[ok], slots[ok]
         if len(boards) == 0:
             return
@@ -527,7 +589,16 @@ class Boards:
         t = self.tables
         env = self.env_of[boards]
         body = t.at_body[attacker]
-        hp = t.at_hp[env, attacker]
+
+        # 耐力も撃破報酬も「何人に湧いたか」で正規化する。
+        # 送りは生存者全員に飛ぶので、守り手が浴びる量は人数に比例するのに
+        # 塔の数は変わらない (VersusMatch#REFERENCE_OPPONENTS)
+        n_env = t.at_reward_total.shape[0]
+        alive_per_env = np.bincount(self.env_of[self.alive],
+                                    minlength=n_env).astype(np.float32)
+        opponents = np.maximum(1.0, alive_per_env[env] - 1.0)
+        hp = t.at_hp[env, attacker] * (
+            (B.REFERENCE_OPPONENTS / opponents) ** B.SEND_POWER_EXPONENT)
 
         self.en_alive[boards, slots] = True
         self.en_body[boards, slots] = body
@@ -535,15 +606,61 @@ class Boards:
         self.en_hp[boards, slots] = hp
         self.en_max_hp[boards, slots] = hp
         self.en_progress[boards, slots] = 0.0
-        self.en_reward[boards, slots] = t.at_reward[env, attacker]
+        # 撃破報酬も同じく人数で割る。割らないと返るコインの総量が
+        # 20% x (人数-1) になり、6 人以上で払った額より返る額が多くなる
+        self.en_reward[boards, slots] = np.maximum(
+            1, np.rint(t.at_reward_total[env, attacker] / opponents)).astype(np.int32)
         self.en_slot[boards, slots] = spawn_index + self.n_spawns * t.en_flying[body]
         for arr in (self.en_slow_ticks, self.en_slow, self.en_burn_ticks,
                     self.en_burn, self.en_vuln_ticks, self.en_vuln,
                     self.en_ward_ticks, self.en_ward, self.en_blink_cd):
             arr[boards, slots] = 0.0
+        self.en_burn_src[boards, slots] = -1
+        self.en_last_hit_kind[boards, slots] = -1
         self.en_revives[boards, slots] = t.en_revives[body]
         self.en_sender[boards, slots] = sender
         np.maximum.at(self.en_count, boards, slots + 1)
+
+    def queue_sends(self, boards: np.ndarray, attacker: np.ndarray,
+                    count: np.ndarray, sender: np.ndarray,
+                    spawn_index: Optional[np.ndarray] = None) -> None:
+        """まとめ送りを待ち行列へ積む。**1 体目はここでは出さない。**
+
+        取り出しは :meth:`_release_pending` が戦闘サブステップごとに行う。
+
+        同じ島に同じ意思決定で複数人から届くことがあるので、
+        島ごとに空いているスロットへ入れる。空きが無ければ捨てる
+        （席数 - 1 しか同時には来ないので、実際には起きない）。
+        """
+        if len(boards) == 0:
+            return
+        if spawn_index is None:
+            spawn_index = np.zeros(len(boards), dtype=np.int32)
+        for b, k, n, snd, sp in zip(boards, attacker, count, sender, spawn_index):
+            b = int(b)
+            free = np.flatnonzero(self.pend_left[b] <= 0)
+            if len(free) == 0:
+                continue
+            slot = int(free[0])
+            self.pend_kind[b, slot] = int(k)
+            self.pend_sender[b, slot] = int(snd)
+            self.pend_left[b, slot] = int(n)
+            self.pend_spawn[b, slot] = int(sp)
+
+    def _release_pending(self) -> None:
+        """待ち行列から 1 島 1 スロットにつき 1 体ずつ湧かせる。"""
+        if not self.pend_left.any():
+            return
+        rows, slots = np.nonzero(self.pend_left > 0)
+        self.spawn(rows.astype(np.int64),
+                   self.pend_kind[rows, slots].astype(np.int64),
+                   sender=self.pend_sender[rows, slots].astype(np.int64),
+                   spawn_index=self.pend_spawn[rows, slots].astype(np.int32))
+        self.pend_left[rows, slots] -= 1
+        done = self.pend_left[rows, slots] <= 0
+        if done.any():
+            self.pend_kind[rows[done], slots[done]] = -1
+            self.pend_sender[rows[done], slots[done]] = -1
 
     def compact_enemies(self) -> None:
         """生きている敵を前に詰める。死んだ枠を放置すると距離行列の幅が
@@ -577,7 +694,8 @@ class Boards:
                      "en_progress", "en_reward", "en_slot", "en_slow_ticks",
                      "en_slow", "en_burn_ticks", "en_burn", "en_vuln_ticks",
                      "en_vuln", "en_ward_ticks", "en_ward", "en_blink_cd",
-                     "en_revives", "en_hit", "en_sender"):
+                     "en_revives", "en_hit", "en_sender",
+                     "en_burn_src", "en_last_hit_kind"):
             arr = getattr(self, name)
             arr[sub_idx, :max_e] = np.take_along_axis(arr[sub_idx, :max_e], order, axis=1)
 
@@ -594,6 +712,9 @@ class Boards:
             remaining -= step
 
     def _substep(self, dt: int, sudden_death: np.ndarray) -> None:
+        # まとめ送りの待ち行列から 1 体ずつ出す。**戦闘より先**に出すことで、
+        # 出たその瞬間から撃たれる（Java の湧きと同じ扱いになる）
+        self._release_pending()
         e_eff = int(self.en_count.max()) if self.n else 0
         if e_eff == 0:
             self._tick_towers_idle(dt)
@@ -632,8 +753,15 @@ class Boards:
         self.en_ward_ticks[:, sl] = np.maximum(0.0, self.en_ward_ticks[:, sl] - dt)
         self.en_ward[:, sl] *= (self.en_ward_ticks[:, sl] > 0)
 
-        # 燃焼は装甲を無視する継続ダメージ
+        # 燃焼は装甲を無視する継続ダメージ。**功績は火を付けた塔に返す**
         ticks = np.minimum(self.en_burn_ticks[:, sl], dt)
+        burn_dmg = np.where(
+            alive, self.en_burn[:, sl] / B.TICKS_PER_SECOND * ticks, 0.0)
+        src = self.en_burn_src[:, sl]
+        bb, ee = np.nonzero((burn_dmg > 0) & (src >= 0))
+        if len(bb):
+            np.add.at(self.stat_damage_by_kind, (bb, src[bb, ee]),
+                      burn_dmg[bb, ee])
         self.en_hp[:, sl] -= np.where(
             alive, self.en_burn[:, sl] / B.TICKS_PER_SECOND * ticks, 0.0)
         self.en_burn_ticks[:, sl] = np.maximum(0.0, self.en_burn_ticks[:, sl] - dt)
@@ -699,8 +827,10 @@ class Boards:
                     + (self.tw_z[:, :, None] - pos[:, None, :, 1]) ** 2)
         hit = (d <= radius[:, None, :]) & active[:, None, :] \
             & (self.tw_kind >= 0)[:, :, None]
-        self.tw_disabled = np.maximum(
-            self.tw_disabled, np.where(hit, ticks[:, None, :], 0.0).max(axis=2))
+        incoming = np.where(hit, ticks[:, None, :], 0.0).max(axis=2)
+        # 監視塔の傘のぶんだけ短くなる。完全無効なら 0 tick＝そもそも黙らない
+        incoming = incoming * (1.0 - self.tw_disable_resist)
+        self.tw_disabled = np.maximum(self.tw_disabled, incoming)
 
     # -- ③ --------------------------------------------------------------
     def _tick_towers_idle(self, dt: int) -> None:
@@ -711,8 +841,8 @@ class Boards:
         self.tw_charge = np.where(
             live, np.minimum(self.tw_charge + (dt - blocked), self._st_cooldown),
             self.tw_charge)
-        self.stat_tower_slots += live.sum(axis=1)
-        self.stat_idle_slots += live.sum(axis=1)
+        # 遊休は数えない。敵が 1 体もいない時間まで数えると、
+        # 「相手が攻めてこない試合」への定額税になり、自分では避けられない
 
     def _fire_towers(self, dt: int, sl: slice, pos: np.ndarray) -> None:
         live = (self.tw_kind >= 0) & self.alive[:, None]
@@ -728,17 +858,16 @@ class Boards:
 
         alive_e = self.en_alive[:, sl] & (self.en_hp[:, sl] > 0)
         if not alive_e.any():
-            self.stat_tower_slots += live.sum(axis=1)
-            self.stat_idle_slots += live.sum(axis=1)
-            return
+            return          # 敵がいない＝遊休の判定対象外（上と同じ理由）
 
         dist = np.sqrt((self.tw_x[:, :, None] - pos[:, None, :, 0]) ** 2
                        + (self.tw_z[:, :, None] - pos[:, None, :, 1]) ** 2)
         in_range = (dist <= self._st_range[:, :, None]) & alive_e[:, None, :] \
             & live[:, :, None]
 
-        # 遊休率＝「射程内に敵が一度も来ない塔」の割合。整形報酬に使う指標で、
-        # 経路から外れた場所に塔を建てる癖を咎める
+        # 遊休率＝「敵がいるのに射程内へ一度も来ない塔」の割合。整形報酬に使う指標で、
+        # 経路から外れた場所に塔を建てる癖を咎める。
+        # 分母もこの枝でしか増えないので、敵がいない時間は率の計算から丸ごと外れる
         has_target = in_range.any(axis=2)
         self.stat_tower_slots += live.sum(axis=1)
         self.stat_idle_slots += (live & ~has_target).sum(axis=1)
@@ -808,12 +937,32 @@ class Boards:
         return np.where(found, best, -1)
 
     # -- 当て方 ----------------------------------------------------------
-    def _apply_damage(self, board, enemy, raw) -> None:
+    def _supply_share(self, live: np.ndarray, kind: np.ndarray,
+                      supply: np.ndarray) -> np.ndarray:
+        """島ごとに「その効果を出している塔の種類」の比率 (n, N_TOWER)。
+
+        撃った瞬間には「誰のバフか」が分からない（``tw_boost_dmg`` は
+        射程内の支援塔ぶんを合算した値なので）。島の中でその効果を供給している
+        塔の量に比例して返すのがいちばん素直で、供給源が 1 種類なら厳密になる。
+        """
+        out = np.zeros((self.n, N_TOWER), dtype=np.float32)
+        amount = np.where(live, supply, 0.0)
+        b, slot = np.nonzero(amount > 0)
+        if len(b):
+            np.add.at(out, (b, kind[b, slot]), amount[b, slot])
+        total = out.sum(axis=1, keepdims=True)
+        return np.divide(out, total, out=np.zeros_like(out), where=total > 0)
+
+    def _apply_damage(self, board, enemy, raw, tower=None) -> None:
         """装甲 → 呪詛 → 庇護 の順に通す。 (EnemyInstance#damage)
 
         順番に意味がある。装甲は固定引き算なので先に引き、そのあとで
         呪詛（増）と庇護（減）を掛ける。逆にすると装甲の高い敵に呪詛をかけた
         ときの伸びが不自然に大きくなる。
+
+        ``tower`` を渡すと **与ダメージの功績**を種類ごとに数える
+        (:meth:`_credit_damage`)。範囲・連鎖・貫通・送還の巻き添えも
+        すべてここを通るので、渡しさえすれば全部数えられる。
         """
         if len(board) == 0:
             return
@@ -821,11 +970,49 @@ class Boards:
         body = np.maximum(self.en_body[board, enemy], 0)
         applied = np.maximum(B.MIN_DAMAGE_AFTER_ARMOR,
                              raw - self.tables.en_armor[env, body])
-        applied *= (1.0 + self.en_vuln[board, enemy])
+        vuln = self.en_vuln[board, enemy]
+        applied *= (1.0 + vuln)
         applied *= (1.0 - self.en_ward[board, enemy])
         applied = np.maximum(B.MIN_DAMAGE_APPLIED, applied)
         np.add.at(self.en_hp, (board, enemy), -applied)
         self.en_hit[board, enemy] = True
+        if tower is not None:
+            self.en_last_hit_kind[board, enemy] = self.tw_kind[board, tower]
+            self._credit_damage(board, tower, applied, vuln)
+
+    def _credit_damage(self, board, tower, applied, vuln) -> None:
+        """与ダメージを **撃った塔・バフ・デバフ** に分けて数える。
+
+        監視塔は自分では 1 ダメージも出さないのに、周りの塔の火力を底上げする。
+        呪詛塔も同じ。**撃った塔に全部つけると、この 2 種は永久に功績 0 になる**
+        ので、増えたぶんを供給元へ返す。
+
+        1 発の被ダメージは ``素の火力 x 支援倍率 x 呪詛倍率`` に分解できる。
+        増えたぶん（積 − 1）を 2 つの要因へ配るとき、交差項 ``a*b`` は
+        どちらの手柄とも言えないので **半分ずつ**にした（2 人ゲームの
+        Shapley 値と同じ配り方）。
+        """
+        boost = self.tw_boost_dmg[board, tower]
+        cd_raw = self._st_cooldown_raw[board, tower]
+        cd_eff = np.maximum(self._st_cooldown[board, tower], 1.0)
+        # 支援は「1 発の威力」と「撃つ回数」の両方を増やす。総ダメージへの
+        # 寄与は両者の積になる
+        m_support = (1.0 + boost) * (cd_raw / cd_eff)
+        m_curse = 1.0 + vuln
+        base = applied / np.maximum(m_support * m_curse, 1e-6)
+
+        a, c = m_support - 1.0, m_curse - 1.0
+        cross = 0.5 * a * c
+        np.add.at(self.stat_damage_by_kind,
+                  (board, np.maximum(self.tw_kind[board, tower], 0)), base)
+        extra_s = base * (a + cross)
+        if (extra_s > 0).any():
+            np.add.at(self.stat_damage_by_kind, board,
+                      self._credit_boost[board] * extra_s[:, None])
+        extra_c = base * (c + cross)
+        if (extra_c > 0).any():
+            np.add.at(self.stat_damage_by_kind, board,
+                      self._credit_vuln[board] * extra_c[:, None])
 
     def _apply_on_hit(self, board, enemy, tower) -> None:
         """命中時の減速・燃焼。 (Battlefield#hit)"""
@@ -853,21 +1040,24 @@ class Boards:
         ok = np.flatnonzero(burn > 0)
         if len(ok):
             bb, ee = board[ok], enemy[ok]
+            deeper = burn[ok] >= self.en_burn[bb, ee]
             self.en_burn[bb, ee] = np.maximum(self.en_burn[bb, ee], burn[ok])
             self.en_burn_ticks[bb, ee] = np.maximum(
                 self.en_burn_ticks[bb, ee], self._st_burn_ticks[board, tower][ok])
+            self.en_burn_src[bb[deeper], ee[deeper]] = self.tw_kind[
+                board[ok][deeper], tower[ok][deeper]]
 
     def _hit_single(self, mask, idx, dmg, sl, pos, dist, alive_e) -> None:
         b, t = np.nonzero(mask)
         e = idx[b, t]
-        self._apply_damage(b, e, dmg[b, t])
+        self._apply_damage(b, e, dmg[b, t], t)
         self._apply_on_hit(b, e, t)
 
     def _hit_splash(self, mask, idx, dmg, sl, pos, dist, alive_e) -> None:
         b, t = np.nonzero(mask)
         e = idx[b, t]
         base = dmg[b, t]
-        self._apply_damage(b, e, base)
+        self._apply_damage(b, e, base, t)
         self._apply_on_hit(b, e, t)
         impact = pos[b, e]
         d = np.sqrt(((pos[b] - impact[:, None, :]) ** 2).sum(axis=2))
@@ -875,7 +1065,7 @@ class Boards:
         hit = (d <= self._st_splash[b, t][:, None]) & alive_e[b] & others
         kk, ee = np.nonzero(hit)
         if len(kk):
-            self._apply_damage(b[kk], ee, base[kk] * B.SPLASH_FALLOFF)
+            self._apply_damage(b[kk], ee, base[kk] * B.SPLASH_FALLOFF, t[kk])
             self._apply_on_hit(b[kk], ee, t[kk])
 
     def _hit_chain(self, mask, idx, dmg, sl, pos, dist, alive_e) -> None:
@@ -895,7 +1085,7 @@ class Boards:
             if len(ai) == 0:
                 break
             cur = current[ai]
-            self._apply_damage(b[ai], cur, damage[ai])
+            self._apply_damage(b[ai], cur, damage[ai], t[ai])
             self._apply_on_hit(b[ai], cur, t[ai])
             already[ai, cur] = True
 
@@ -914,7 +1104,7 @@ class Boards:
         b, t = np.nonzero(mask)
         e = idx[b, t]
         base = dmg[b, t]
-        self._apply_damage(b, e, base)
+        self._apply_damage(b, e, base, t)
         self._apply_on_hit(b, e, t)
 
         muzzle = np.stack([self.tw_x[b, t], self.tw_z[b, t]], axis=1)
@@ -932,7 +1122,7 @@ class Boards:
         hit &= rank < extra[:, None]
         kk, ee = np.nonzero(hit)
         if len(kk):
-            self._apply_damage(b[kk], ee, base[kk] * B.PIERCE_FALLOFF)
+            self._apply_damage(b[kk], ee, base[kk] * B.PIERCE_FALLOFF, t[kk])
             self._apply_on_hit(b[kk], ee, t[kk])
 
     def _hit_banish(self, mask, idx, dmg, sl, pos, dist, alive_e) -> None:
@@ -941,7 +1131,7 @@ class Boards:
         e = idx[b, t]
         base = dmg[b, t]
         n_e = pos.shape[1]
-        self._apply_damage(b, e, base)
+        self._apply_damage(b, e, base, t)
         self._apply_on_hit(b, e, t)
         alive_now = self.en_hp[b, e] > 0
         self.en_progress[b[alive_now], e[alive_now]] = 0.0
@@ -958,7 +1148,7 @@ class Boards:
         sel = pool & (rank < extra[:, None])
         kk, ee = np.nonzero(sel)
         if len(kk):
-            self._apply_damage(b[kk], ee, base[kk])
+            self._apply_damage(b[kk], ee, base[kk], t[kk])
             self._apply_on_hit(b[kk], ee, t[kk])
             still = self.en_hp[b[kk], ee] > 0
             self.en_progress[b[kk][still], ee[still]] = 0.0
@@ -1061,8 +1251,10 @@ class Boards:
             return
         b, e = np.nonzero(dead)
 
-        # 終焉騎は倒れる代わりに出発点へ戻り、ライフ上限を 1 奪う。
-        # 「倒しさえすれば損はない」を崩す唯一の仕掛けなので、報酬は出さない
+        # 終焉騎は倒れる代わりに出発点へ戻る。報酬も出さない。
+        # **ここでライフ上限は奪わない。** 倒しても上限が減るなら防衛に正解が
+        # 存在せず、タワーディフェンスとして成立しない。上限を奪うのは
+        # 「コアまで通されたとき」だけ (Island#onEnemyLeaked)
         revive = self.en_revives[b, e] > 0
         if revive.any():
             rb, re = b[revive], e[revive]
@@ -1072,15 +1264,15 @@ class Boards:
             for arr in (self.en_slow_ticks, self.en_slow,
                         self.en_burn_ticks, self.en_burn):
                 arr[rb, re] = 0.0
-            np.subtract.at(self.max_lives, rb, 1.0)
-            np.add.at(self.stat_max_life_lost, rb, 1.0)
-            self.max_lives = np.maximum(0.0, self.max_lives)
-            self.lives = np.minimum(self.lives, self.max_lives)
 
         gone = ~revive
         if not gone.any():
             return
         gb, ge = b[gone], e[gone]
+        killer = self.en_last_hit_kind[gb, ge]
+        hit = killer >= 0
+        if hit.any():
+            np.add.at(self.stat_kills_by_kind, (gb[hit], killer[hit]), 1.0)
         reward = self.en_reward[gb, ge].astype(np.float32)
         np.add.at(self.coins, gb, reward)
         np.add.at(self.stat_coins_earned, gb, reward)
@@ -1128,6 +1320,8 @@ class Boards:
                         self.en_burn, self.en_vuln_ticks, self.en_vuln,
                         self.en_ward_ticks, self.en_ward, self.en_blink_cd):
                 arr[b, slots] = 0.0
+            self.en_burn_src[b, slots] = -1
+            self.en_last_hit_kind[b, slots] = -1
             self.en_revives[b, slots] = 0
             np.maximum.at(self.en_count, b, slots + 1)
 
@@ -1141,6 +1335,16 @@ class Boards:
         np.subtract.at(self.lives, b, np.where(sudden_death[b], 2.0, 1.0))
         self.lives = np.maximum(0.0, self.lives)
         np.add.at(self.stat_leaks, b, 1)
+
+        # 終焉騎だけは、通されるとライフ上限そのものを持っていく。
+        # 倒し切れば無傷／通せば取り返しがつかない (Island#onEnemyLeaked)
+        steal = self.tables.en_steals_max_life[np.maximum(self.en_body[b, e], 0)]
+        if steal.any():
+            sb = b[steal]
+            np.subtract.at(self.max_lives, sb, 1.0)
+            np.add.at(self.stat_max_life_lost, sb, 1.0)
+            self.max_lives = np.maximum(0.0, self.max_lives)
+            self.lives = np.minimum(self.lives, self.max_lives)
         att = np.maximum(self.en_attacker[b, e], 0)
         # 呼び出し元(env)の stat_leaks_by_kind に加算するため、boards の参照から追記
         if hasattr(self, 'env_ref') and self.env_ref is not None:

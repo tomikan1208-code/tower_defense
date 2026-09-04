@@ -145,19 +145,29 @@ public enum TowerKind {
                     1.0, 5.0, 1.0, 0, 0, 0, 0)
                     .looking(Look.of().helmet(Material.BEACON).spreading())),
 
+    /**
+     * 数字を上げるだけでなく、<b>妨害者から守る</b>塔。
+     *
+     * <p>妨害者（クリーパー）は火力を 1 箇所に固めるほどまとめて黙らせてくる。
+     * その対策が「散らして置く」しかないと、結局どの構成も同じ形に収束してしまう。
+     * 監視塔の傘の下だけは固めてよい、という逃げ道を作るために、
+     * 射程内の塔が受ける妨害を <b>半分</b>にする。特化まで育てると <b>完全に無効</b>。
+     * 傘は重ねても厚くならない（軽減率は最大値を採る）ので、
+     * 監視塔を並べて無効化することはできず、無効化は特化でしか手に入らない。</p>
+     */
     WATCHTOWER(
-            "監視塔", "周りのタワーの威力と手数を上げる。自分は撃たない。",
+            "監視塔", "周りのタワーの威力と手数を上げ、妨害を半減する。自分は撃たない。",
             Shapes.O, Material.BELL, Block.SMOOTH_STONE_SLAB, Model.villager(VillagerProfession.NONE),
             Element.NONE, AttackStyle.SUPPORT, Targeting.NONE,
             120, 5.0, 40, 0.0,
             0.0, 0, 0.0, 0, 0.0, 0,
             SoundEvent.BLOCK_BELL_USE, 1.4f, null,
-            Effect.watch(0.30, 0.15),
-            new Spec("号令", "威力の上乗せが 2 倍になる",
-                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0.30, 0))
+            Effect.watch(0.30, 0.15, 0.5),
+            new Spec("号令", "威力の上乗せが 2 倍になる。妨害を完全に無効化する",
+                    1.0, 0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0.30, 0, 0.5))
                     .looking(Look.of().job(VillagerProfession.LIBRARIAN)),
-            new Spec("展望", "射程が伸び、手数の上乗せが厚くなる",
-                    1.0, 4.0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0, 0.15))
+            new Spec("展望", "射程が伸び、手数の上乗せが厚くなる。妨害を完全に無効化する",
+                    1.0, 4.0, 1.0, 0, 0, 0, 0, 1.0, Effect.watch(0, 0.15, 0.5))
                     .looking(Look.of().job(VillagerProfession.CARTOGRAPHER)));
 
     /**
@@ -190,7 +200,18 @@ public enum TowerKind {
         return spec == null ? model.look() : model.look().with(spec.look());
     }
 
+    /** シングルでの強化上限。 */
     public static final int MAX_LEVEL = 3;
+
+    /**
+     * 対戦での強化上限。
+     *
+     * <p>置ける塔が {@code Island.MAX_TOWERS} 基で頭打ちなので、
+     * 指数で伸びるコインの受け皿は <b>「上へ伸ばす」しかない</b>。
+     * 上限 3・等差のままだと、盤面を完全に埋めても総額 2 万コインで終わり、
+     * それ以降のコインは行き場を失う。</p>
+     */
+    public static final int VERSUS_MAX_LEVEL = 5;
 
     private final String displayName;
     private final String description;
@@ -353,7 +374,34 @@ public enum TowerKind {
 
     /** レベル 0 から level へ上げるのに必要なゴールド。 */
     public int upgradeCost(int level) {
-        return (int) Math.round(baseCost * (0.7 + 0.55 * (level + 1)));
+        return upgradeCost(level, MAX_LEVEL);
+    }
+
+    /**
+     * レベル {@code level} から次へ上げるのに必要なゴールド。
+     *
+     * <p><b>上限によって曲線そのものが変わる。</b></p>
+     *
+     * <ul>
+     *   <li><b>シングル（上限 3）は等差</b>。1 ステージぶんの所持金が決まっているので、
+     *       等比にすると最後の 1 段が絶対に届かない飾りになる</li>
+     *   <li><b>対戦（上限 5）は等比</b>（1 段ごとに 2.6 倍）。対戦の収入は指数で伸びるので、
+     *       定額の受け皿だとすぐ埋まってしまい、<b>行き場のないコインが積み上がる</b>。
+     *       等比にしておけば受け皿は最後まで埋まらない</li>
+     * </ul>
+     *
+     * <p>火力の伸びは 1 段 1.384 倍なので、<b>強化するほどコインあたりの火力は割高になる</b>
+     * （2.6 払って 1.384 しか伸びない）。それでも上げるのは
+     * {@code Island.MAX_TOWERS} で置ける数に上限があるからで、
+     * <b>「金を火力に変える交換レートが、豊かになるほど悪くなる」</b>
+     * ことがそのまま雪だるまの抑制になっている。Hypixel TowerWars と同じ構造。
+     * 経緯は {@code docs/VERSUS_ECONOMY_ja.md} を参照。</p>
+     */
+    public int upgradeCost(int level, int maxLevel) {
+        if (maxLevel <= MAX_LEVEL) {
+            return (int) Math.round(baseCost * (0.7 + 0.55 * (level + 1)));
+        }
+        return (int) Math.round(baseCost * 0.9 * Math.pow(2.6, level));
     }
 
     /**
@@ -412,12 +460,15 @@ public enum TowerKind {
      * @param spec 最終段階で選んだ特化。未選択なら null
      */
     public Stats statsAt(int level, Spec spec) {
-        double levelMul = 1.0 + 0.55 * level;
+        // 等比。指数 1.384 は「上限 3 のときの旧式（1 + 0.55 * level）と
+        // レベル 3 でぴったり一致する」ように選んである（1.384^3 = 2.65）。
+        // シングルの体感は変えずに、対戦のレベル 4・5 ぶんの伸びしろだけを足すため。
+        double levelMul = Math.pow(1.384, level);
         double damage = baseDamage * levelMul;
         double range = baseRange + 0.6 * level;
         int cooldown = Math.max(2, (int) Math.round(baseCooldown * Math.pow(0.88, level)));
         double splash = splashRadius + 0.25 * level;
-        int chain = chainTargets + (level >= 2 ? 1 : 0);
+        int chain = chainTargets + (level >= 2 ? 1 : 0) + (level >= 4 ? 1 : 0);
         double slow = slowFactor > 0 ? Math.min(0.75, slowFactor + 0.05 * level) : 0.0;
         double burn = burnDps * levelMul;
         int burnFor = burnTicks;
@@ -429,7 +480,10 @@ public enum TowerKind {
                 effect.vulnerability() * levelMul,
                 effect.vulnerabilityTicks(),
                 effect.boostDamage() * levelMul,
-                effect.boostRate() * levelMul);
+                effect.boostRate() * levelMul,
+                // 妨害の軽減率はレベルで伸ばさない。
+                // 伸ばすと特化を選ぶ前に 100% に届いてしまい、「半減 → 特化で無効」の段取りが消える
+                effect.disableResist());
 
         if (spec != null) {
             damage *= spec.damageMul();

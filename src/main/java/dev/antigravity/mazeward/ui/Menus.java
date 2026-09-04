@@ -200,6 +200,13 @@ public final class Menus {
             lore.add(Component.text(String.format("支援 周囲の塔の威力 +%.0f%%  手数 +%.0f%%",
                     effect.boostDamage() * 100, effect.boostRate() * 100), NamedTextColor.AQUA));
         }
+        if (effect.disableResist() > 0) {
+            lore.add(Component.text(effect.disableResist() >= 1.0
+                    ? "傘 周囲の塔は妨害者に黙らされない"
+                    : String.format("傘 周囲の塔が受ける妨害 -%.0f%%",
+                            effect.disableResist() * 100),
+                    NamedTextColor.AQUA));
+        }
         return lore;
     }
 
@@ -253,6 +260,13 @@ public final class Menus {
                     lore.add(Component.text(String.format("監視塔の支援: 威力 +%.0f%%  手数 +%.0f%%",
                             tower.boostDamage() * 100, tower.boostRate() * 100),
                             NamedTextColor.AQUA));
+                }
+                if (tower.disableImmune()) {
+                    lore.add(Component.text("監視塔の傘: 妨害を完全に無効化",
+                            NamedTextColor.AQUA));
+                } else if (tower.disableResist() > 0) {
+                    lore.add(Component.text(String.format("監視塔の傘: 妨害 -%.0f%%",
+                            tower.disableResist() * 100), NamedTextColor.AQUA));
                 }
                 if (tower.disabled()) {
                     lore.add(Component.text("妨害されて停止中", NamedTextColor.RED));
