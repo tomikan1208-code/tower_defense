@@ -23,6 +23,11 @@ java {
 
 application {
     mainClass.set("dev.antigravity.mazeward.MazewardMain")
+    // 検証タスクと同じく UTF-8 で出す。指定しないと日本語 Windows では
+    // JVM が cp932 で書き、コンソール側は 65001 なのでログが全部文字化けする
+    // （「起動しました」も「落ちました」も読めないと、原因調査そのものが始められない）
+    applicationDefaultJvmArgs = listOf(
+        "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }
 
 tasks.withType<JavaCompile>().configureEach {

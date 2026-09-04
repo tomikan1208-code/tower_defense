@@ -13,3 +13,15 @@ __pycache__/
 -Users-yuuki-IdeaProjects-scorpius/
 .idea/
 *.iml
+
+# 掃引の途中経過（実行するたびに書き換わる）
+ai/_sweep_progress.md
+ai/_sweep_result.json
+ai/models/*.stale
+
+# 世代スナップショット。学習のたびに 1.5MB ずつ履歴が膨らむので追跡しない。
+# 続きを回すのに要るのは ppo_latest.pt だけで、こちらは追跡している
+ai/models/ppo_gen*.pt
+
+# 開発サーバの起動設定。python の絶対パスが入っていて機械ごとに違う
+.claude/
