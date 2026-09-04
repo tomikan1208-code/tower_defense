@@ -48,10 +48,18 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import balance as B                                        # noqa: E402
+import trainer_pb as pb                                     # noqa: E402
 from mazeward_env.env import (A_CARD, A_SELL, A_SEND, A_SKIP, A_TOWER,  # noqa: E402
                               A_UPGRADE, ACTION_HEADS)
 from mazeward_env.mc_snapshot import SnapshotEncoder        # noqa: E402
 from policy import Policy, masked_logits                    # noqa: E402
+
+# **必ず最初に呼ぶ。** Minecraft サーバーから起動されると標準出力は
+# 親コンソールの符号化（日本語 Windows なら cp932）になり、"—" のような
+# 文字を 1 つ出した瞬間に UnicodeEncodeError で **ブリッジごと落ちる**。
+# 落ちた側は貪欲ボットに切り替わるだけなので、画面には
+# 「AI が弱い」としか出ず、原因に辿り着けない（実際に踏んだ）。
+pb.ensure_utf8_stdout()
 
 DEVICE = torch.device("cpu")
 """**CPU で動かす。** 1 秒に 1 回・最大 8 島の前向き計算に GPU を占有すると、
@@ -59,28 +67,74 @@ DEVICE = torch.device("cpu")
 
 
 class Brain:
-    """方策 1 つぶん。接続をまたいで使い回す。"""
+    """方策 1 つぶん。接続をまたいで使い回す。
+
+    **試合中でもモデルを差し替えられる。** Minecraft 側からモデルを選ぶとき、
+    ブリッジを立て直していると torch の読み込みで毎回数秒待つことになる。
+    重みだけ入れ替えれば 0.2 秒で済む（観測の作りは変わらないため）。
+    """
 
     def __init__(self, model_path: str, greedy: bool = False):
         self.encoder = SnapshotEncoder()
         self.greedy = greedy
         self.lock = threading.Lock()
         self.net = Policy().to(DEVICE)
+        self.model_dir = os.path.dirname(os.path.abspath(model_path))
+        self.model_path = os.path.abspath(model_path)
+        self.loaded = False
         self.label = self._load(model_path)
         self.net.eval()
 
     def _load(self, path: str) -> str:
+        """重みを読む。失敗しても例外は投げず、ラベルに理由を残す。"""
+        self.loaded = False
         if not os.path.isfile(path):
             print(f"[brain] {path} が無いので初期値のまま動かします（弱いです）")
-            return "未学習の方策"
+            return "未学習の方策（重みが無い）"
         state = torch.load(path, map_location=DEVICE, weights_only=False)
         weights = state.get("net", state) if isinstance(state, dict) else state
-        self.net.load_state_dict(weights)
+        try:
+            self.net.load_state_dict(weights)
+        except RuntimeError as mismatch:
+            # 観測の作りを変えると入力次元が変わり、古い重みは形が合わなくなる。
+            # ここで落とすと Minecraft 側は「AI が繋がらない」としか分からないので、
+            # 理由を出して貪欲ボットに任せる（試合は成立する）
+            print(f"[brain] {path} は今の観測と形が合いません: {mismatch}")
+            print("[brain] 観測か行動の定義を変えたあとは学習をやり直してください")
+            return "形の合わない方策（貪欲ボットに任せます）"
         generation = state.get("gen") if isinstance(state, dict) else None
         name = os.path.basename(path)
+        self.model_path = os.path.abspath(path)
+        self.loaded = True
         print(f"[brain] {path} を読み込みました"
               + (f"（第 {generation} 世代）" if generation is not None else ""))
-        return f"学習済み方策 {name}" + (f" gen{generation}" if generation is not None else "")
+        return name + (f" gen{generation}" if generation is not None else "")
+
+    # ---------------------------------------------------------------- 差し替え
+    def use(self, name: str) -> str:
+        """``models/`` の中のファイル名を指定して読み直す。
+
+        **ディレクトリの外は見に行かない。** ネットワーク越しに来た文字列を
+        そのままパスとして開くと、任意のファイルを読ませられてしまう。
+        """
+        safe = os.path.basename(name.strip())
+        if not safe.endswith(".pt"):
+            safe += ".pt"
+        path = os.path.join(self.model_dir, safe)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(safe)
+        with self.lock:
+            self.label = self._load(path)
+        return self.label
+
+    def list_models(self) -> List[str]:
+        """``models/`` にある重みの一覧（新しい順）。"""
+        if not os.path.isdir(self.model_dir):
+            return []
+        files = [f for f in os.listdir(self.model_dir) if f.endswith(".pt")]
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(self.model_dir, f)),
+                   reverse=True)
+        return files
 
     # ---------------------------------------------------------------- 推論
     @torch.no_grad()
@@ -109,6 +163,7 @@ class Brain:
                                  obs["mask_unit_upgrade"], obs["mask_unit_sell"])
             action["unit"] = self._pick(logits["unit"], unit_mask)
             action["send"] = self._pick(logits["send"], obs["mask_send"])
+            action["send_n"] = self._pick(logits["send_n"], obs["mask_send_n"])
             action["spec"] = self._pick(
                 logits["spec"], np.ones((n, ACTION_HEADS["spec"]), dtype=bool))
             # セルのマスクは選んだ形に依存するので、ここだけ後から作る
@@ -141,7 +196,9 @@ class Brain:
         if kind == A_SELL:
             return f"sell {int(action['unit'][seat])}"
         if kind == A_SEND:
-            return f"send {B.ATTACKER_ORDER[int(action['send'][seat])]}"
+            # 体数は 1 始まり。1 のときも明示して送る（Java 側は省略も許す）
+            count = int(action["send_n"][seat]) + 1
+            return f"send {B.ATTACKER_ORDER[int(action['send'][seat])]} {count}"
         return "skip"
 
 
@@ -162,6 +219,14 @@ class Handler(socketserver.StreamRequestHandler):
                 if line == "ping":
                     self._send("hello " + brain.label)
                     continue
+                if line == "models":
+                    for name in brain.list_models():
+                        self._send("model " + name)
+                    self._send("endmodels")
+                    continue
+                if line.startswith("use "):
+                    self._use(brain, line[4:])
+                    continue
                 if not line.startswith("req "):
                     continue
                 head, _, payload = line[4:].partition(" ")
@@ -170,6 +235,22 @@ class Handler(socketserver.StreamRequestHandler):
             pass
         finally:
             print(f"[brain] 切断 {peer[0]}:{peer[1]}")
+
+    def _use(self, brain: Brain, name: str) -> None:
+        """モデルを差し替える。成功しても失敗しても、必ず結果を返す。
+
+        黙って失敗すると Minecraft 側には「選んだのに変わらない」としか見えない。
+        """
+        try:
+            label = brain.use(name)
+        except FileNotFoundError as missing:
+            self._send(f"err 0 モデルが見つかりません: {missing}")
+            return
+        except Exception as exception:                      # noqa: BLE001
+            traceback.print_exc()
+            self._send(f"err 0 モデルを読めません: {exception}")
+            return
+        self._send("hello " + label)
 
     def _answer(self, brain: Brain, request_id: str, payload: str) -> None:
         try:
@@ -250,7 +331,9 @@ def main() -> int:
 
     server = Server((args.host, args.port), Handler)
     server.brain = brain
-    print(f"[brain] {args.host}:{args.port} で待機中 — {brain.label}")
+    # 記号は ASCII に留める。ensure_utf8_stdout が効かない環境
+    # （再設定できない標準出力）でも、ここで落ちないようにするため
+    print(f"[brain] {args.host}:{args.port} で待機中 / モデル {brain.label}")
     print("[brain] Minecraft 側でロビーの「AI」を選ぶと繋がります。Ctrl+C で終了")
     try:
         server.serve_forever()

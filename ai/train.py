@@ -28,11 +28,14 @@ Theta* と観測の組み立てで、どちらも「呼ぶ回数を減らす」�
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
 import random
+import signal
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -49,8 +52,11 @@ import trainer_pb as pb                                      # noqa: E402
 from mazeward_env.bots_heuristic import empty_action, make_bot  # noqa: E402
 from mazeward_env.env import (A_CARD, A_SELL, A_SEND, A_SKIP, A_TOWER,   # noqa: E402
                               A_UPGRADE, ACTION_HEADS, VersusEnv)
+from mazeward_env.observation import (N_CHANNELS, OPP_FEATURES,   # noqa: E402
+                                      SCALAR_DIM)
 from mazeward_env.rules import (CURRICULUM, EnvConfig, apply_curriculum,  # noqa: E402
                                 curriculum_stage)
+from mazeward_env import reward as R                          # noqa: E402
 from policy import OBS_SCALE, Policy, masked_logits           # noqa: E402
 
 PREFIX = "MAZEWARD"
@@ -60,25 +66,90 @@ LOG_NAME = "ppo"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# **分布の引数検証を切る。** 学習ループでは同じ形の logits を毎 step 何万回も
+# 通すので、simplex 判定と shape 検証が純粋な税になる（実測で act が 12.7 →
+# 9.8 ms）。壊れた logits は NaN として loss に出るので、検証で守る意味が薄い
+torch.distributions.Distribution.set_default_validate_args(False)
+if DEVICE.type == "cuda":
+    # 盤面 CNN は形が固定なので、最初の数回でいちばん速い実装を選ばせる
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+def _amp_setting() -> Tuple[Optional["torch.dtype"], bool]:
+    """自動混合精度の型を GPU 世代から決める。``(dtype, スケーラが要るか)``。
+
+    **``torch.cuda.is_bf16_supported()`` を信じてはいけない。** 既定引数が
+    ``including_emulation=True`` なので、Turing (T4) のように bf16 の
+    ハードウェア対応が無い GPU でも **エミュレーションで True を返す**。
+    掴むと fp32 より遅くなる。Colab の無料枠は T4 なので実害が出る。
+
+    - compute capability 8.0 以上 (Ampere / Ada / Hopper) … bf16。
+      指数部が fp32 と同じなので ``GradScaler`` が要らない
+    - 7.x (Volta / Turing = V100 / T4) … fp16。fp16 のテンソルコアは速いが
+      指数部が狭いので勾配が 0 に潰れる。``GradScaler`` が要る
+    - それ未満 … 混合精度を使わない
+    """
+    if DEVICE.type != "cuda":
+        return None, False
+    major = torch.cuda.get_device_capability()[0]
+    if major >= 8:
+        return torch.bfloat16, False
+    if major == 7:
+        return torch.float16, True
+    return None, False
+
+
+AMP_DTYPE, AMP_NEEDS_SCALER = _amp_setting()
+AMP_OK = AMP_DTYPE is not None
+#: fp16 のときだけ使う。スケールは学習中に自動調整されるので使い回す
+_SCALER = (torch.amp.GradScaler("cuda") if AMP_NEEDS_SCALER else None)
+
 
 # ════════════════════════════════════════════════════════════════════
 # 設定
 # ════════════════════════════════════════════════════════════════════
+#: 世代数に上限が無いとき、カリキュラムを 1 周させる世代数。
+#: 4 段階 x 10 世代。GUI の既定（20 世代）より長いのは、上限なしで回すなら
+#: 「基礎を十分に踏ませてから広げる」余裕があるから。
+DEFAULT_CURRICULUM_GENS = 40
+
+
 @dataclass
 class TrainConfig:
+    #: 回す世代数。**0 以下なら上限なし**で、停止要求（GUI の停止ボタン、
+    #: または Ctrl+C）が来るまで回り続ける。
     max_gens: int = pb.env_int(f"{PREFIX}_MAX_GENS", 20)
-    num_envs: int = pb.env_int(f"{PREFIX}_NUM_ENVS", 0)     # 0 = 自動
+    #: カリキュラムを何世代かけて 1 周させるか。0 なら :attr:`max_gens`。
+    #:
+    #: **なぜ分けるか。** 以前は世代数がそのまま分母だったので、長く回そうと
+    #: 大きい値を入れると ``ratio = gen / max_gens`` がいつまでも小さいまま、
+    #: 第 1 段階（15x15・2人・走狗のみ）から一生上がらなかった。逆に再開時は
+    #: ``gen`` だけが伸びて分母は 1 回ぶんのままなので、2 回目以降はいきなり
+    #: 最終段階に貼り付いた。**分母は実行回数と無関係に決める。**
+    curriculum_gens: int = pb.env_int(f"{PREFIX}_CURRICULUM_GENS", 0)
+    #: 同時に走らせる試合の枠数。**0 を渡したときだけ**実機から自動で決める
+    #: (:func:`trainer_pb.auto_num_envs`)。既定を 64 にしてあるのは、
+    #: 12 コアの実測で総スループットが 48 枠あたりで頭打ちになり、
+    #: そこから先は「1 世代あたりの対局数」が増えるだけだから。
+    #: バランス判断のサンプル数はそのぶん増える
+    num_envs: int = pb.env_int(f"{PREFIX}_NUM_ENVS", 64)
     rollout: int = pb.env_int(f"{PREFIX}_ROLLOUT", 96)
     epochs: int = pb.env_int(f"{PREFIX}_EPOCHS", 3)
     minibatch: int = pb.env_int(f"{PREFIX}_MINIBATCH", 1024)
     lr: float = pb.env_float(f"{PREFIX}_LR", 2.5e-4)
-    gamma: float = pb.env_float(f"{PREFIX}_GAMMA", 0.997)
+    #: 割引率。既定は :data:`reward.GAMMA`（1 つしか無い値なので、
+    #: 環境変数で上書きしたら整形側にも代入し直す。:func:`_sync_gamma`）
+    gamma: float = pb.env_float(f"{PREFIX}_GAMMA", R.GAMMA)
     gae_lambda: float = pb.env_float(f"{PREFIX}_GAE", 0.95)
     clip: float = pb.env_float(f"{PREFIX}_CLIP", 0.2)
     entropy: float = pb.env_float(f"{PREFIX}_ENTROPY", 0.02)
     value_coef: float = pb.env_float(f"{PREFIX}_VALUE_COEF", 0.5)
     max_grad_norm: float = pb.env_float(f"{PREFIX}_GRAD_NORM", 0.5)
-    randomize: float = pb.env_float(f"{PREFIX}_RANDOMIZE", 0.20)
+    #: ドメインランダム化の強さ。**既定は 0（無効）**。
+    #: 揺らしたままだと、指標の変化がバランス調整のせいなのか
+    #: ランダム化のせいなのか切り分けられない
+    randomize: float = pb.env_float(f"{PREFIX}_RANDOMIZE", 0.0)
     bc_batches: int = pb.env_int(f"{PREFIX}_BC_BATCHES", 60)
     eval_every: int = pb.env_int(f"{PREFIX}_EVAL_EVERY", 5)
     eval_games: int = pb.env_int(f"{PREFIX}_EVAL_GAMES", 12)
@@ -86,14 +157,29 @@ class TrainConfig:
     bot_ratio: float = pb.env_float(f"{PREFIX}_BOT_RATIO", 0.35)
     seed: int = pb.env_int(f"{PREFIX}_SEED", 0)
     curriculum: int = pb.env_int(f"{PREFIX}_CURRICULUM", 1)
+    #: 相手を席ごとに引くか（0 = 従来どおり試合ごと）。
+    #: :func:`assign_controllers` を参照
+    seat_opponents: int = pb.env_int(f"{PREFIX}_SEAT_OPPONENTS", 1)
+    #: 1 世代で同時に相手にする過去チェックポイントの数。
+    #: :meth:`League.refresh_past_pool` を参照
+    past_slots: int = pb.env_int(f"{PREFIX}_PAST_SLOTS", 2)
+    #: PPO 更新を bf16 の自動混合精度で回すか。0 で従来どおり fp32。
+    #: 実測（RTX 3050・学習島 225）で 1 チャンク 9.3 → 4.9 秒
+    amp: int = pb.env_int(f"{PREFIX}_AMP", 1)
 
     # ---- 世代の区切り（ゲーム内時間と試合完了率で決める） ----
     #: ここまでは「全部の試合が終わる」ことを待つ（ゲーム内・分）
-    gen_early_minutes: float = pb.env_float(f"{PREFIX}_GEN_EARLY_MIN", 30.0)
+    gen_early_minutes: float = pb.env_float(f"{PREFIX}_GEN_EARLY_MIN", 20.0)
     #: ここを超えたら完了率に関わらず打ち切る（ゲーム内・分）
-    gen_max_minutes: float = pb.env_float(f"{PREFIX}_GEN_MAX_MIN", 60.0)
-    #: 早い段階で要求する完了率
-    gen_finish_early: float = pb.env_float(f"{PREFIX}_GEN_FINISH_EARLY", 1.0)
+    gen_max_minutes: float = pb.env_float(f"{PREFIX}_GEN_MAX_MIN", 30.0)
+    #: 要求する完了率。**最初からこの値で判定する。**
+    #:
+    #: 以前は 1.0 で、``gen_early_minutes``（20 分）を過ぎるまで
+    #: 「全枠が 1 試合以上を終える」ことを待っていた。人数は 2〜8 人で
+    #: 抽選されるので、**8 人戦の 1 枠が世代全体の長さを決めてしまう**。
+    #: 実測では 1 枠あたり平均 3.1 試合が終わっているのに、世代は上限の
+    #: 30 分まで走り切っていた（``games_finished: 198`` / 64 枠）
+    gen_finish_early: float = pb.env_float(f"{PREFIX}_GEN_FINISH_EARLY", 0.9)
     #: 30 分を過ぎたあとに要求する完了率
     gen_finish_late: float = pb.env_float(f"{PREFIX}_GEN_FINISH_LATE", 0.9)
     #: **1 試合の時間切れ（ゲーム内・分）。0 = 時間切れなし。**
@@ -111,6 +197,47 @@ class TrainConfig:
         """1 試合の上限 tick。0 指定なら世代の打ち切りまで走らせる。"""
         minutes = self.match_max_min if self.match_max_min > 0 else self.gen_max_minutes
         return int(minutes * 60 * B.TICKS_PER_SECOND)
+
+    def curriculum_total(self) -> int:
+        """カリキュラムの分母。上限なしのときは既定の長さに落とす。"""
+        if self.curriculum_gens > 0:
+            return self.curriculum_gens
+        if self.max_gens > 0:
+            return self.max_gens
+        return DEFAULT_CURRICULUM_GENS
+
+
+#: 停止要求。GUI の停止ボタンと Ctrl+C の両方がこれを立てる。
+#: **プロセスを即殺さずフラグにする**のは、世代の途中で殺すとその世代ぶんの
+#: 学習が ``ppo_latest.pt`` に入らないまま消えるため。塊の切れ目で抜けて、
+#: いつもどおり保存してから終わる。
+STOP = threading.Event()
+
+
+def _on_stop(signum, frame) -> None:      # noqa: ARG001
+    if STOP.is_set():
+        # 2 度目は待たない。1 度目のあと保存で固まったときの逃げ道
+        print("停止要求（2 回目）。ただちに終了します", flush=True)
+        raise SystemExit(1)
+    STOP.set()
+    print("停止要求を受けました。いまの塊を終えて保存してから終了します",
+          flush=True)
+
+
+def install_stop_handlers() -> None:
+    """止められる口をすべて塞ぐ。**受け取れないシグナルは黙って飛ばす。**
+
+    Windows の ``SIGTERM`` は ``TerminateProcess`` で配送されず捕まえられない
+    ので、ダッシュボード側は ``CTRL_BREAK_EVENT``（= ``SIGBREAK``）を送る。
+    """
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _on_stop)
+        except (ValueError, OSError):
+            pass
 
 
 def generation_done(game_minutes: float, completion: float,
@@ -155,9 +282,14 @@ class Rollout:
 
     def __init__(self, steps: int, n: int):
         self.steps, self.n = steps, n
-        self.grid = np.zeros((steps, n, 14, B.MAX_BOARD, B.MAX_BOARD), np.uint8)
-        self.scalar = np.zeros((steps, n, 210), np.float32)
-        self.opponents = np.zeros((steps, n, B.MAX_PLAYERS, 14), np.float32)
+        # **観測の定数から引くこと。** ここに数字を直接書くと、観測を
+        # 1 本増やした瞬間に「形が合わない」で学習だけが落ちる
+        # （実際に 14 と 210 が固定で書かれていて踏んだ）
+        self.grid = np.zeros((steps, n, N_CHANNELS, B.MAX_BOARD, B.MAX_BOARD),
+                             np.uint8)
+        self.scalar = np.zeros((steps, n, SCALAR_DIM), np.float32)
+        self.opponents = np.zeros((steps, n, B.MAX_PLAYERS, OPP_FEATURES),
+                                  np.float32)
         self.opp_mask = np.zeros((steps, n, B.MAX_PLAYERS), np.float32)
         self.masks = {k: np.zeros((steps, n, v), bool)
                       for k, v in ACTION_HEADS.items()}
@@ -198,14 +330,12 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
     logits, value = net(tobs)
 
     def pick(name: str, mask_np: np.ndarray) -> Tuple[np.ndarray, torch.Tensor, torch.Tensor]:
+        # **分布オブジェクトを作らない**（:meth:`Policy.sample`）。
+        # 以前はサンプリング用と log 確率用に ``Categorical`` を 2 回作っていて、
+        # ヘッド 7 本ぶんで 14 個できていた
         mask = torch.as_tensor(mask_np, device=DEVICE)
-        ml = masked_logits(logits[name], mask)
-        if greedy:
-            a = ml.argmax(dim=-1)
-        else:
-            a = torch.distributions.Categorical(logits=ml).sample()
-        dist = torch.distributions.Categorical(logits=ml)
-        return a.cpu().numpy(), dist.log_prob(a), mask
+        a, logp = net.sample(logits[name], mask, greedy)
+        return a.cpu().numpy(), logp, mask
 
     stored_masks: Dict[str, np.ndarray] = {}
     a_type, lp_type, m_type = pick("type", obs["mask_type"][boards])
@@ -219,6 +349,7 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
                          obs["mask_unit_sell"][boards])
     a_unit, lp_unit, _ = pick("unit", unit_mask)
     a_send, lp_send, _ = pick("send", obs["mask_send"][boards])
+    a_send_n, lp_send_n, _ = pick("send_n", obs["mask_send_n"][boards])
     spec_mask = np.ones((len(boards), ACTION_HEADS["spec"]), bool)
     a_spec, lp_spec, _ = pick("spec", spec_mask)
 
@@ -226,6 +357,7 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
     stored_masks["tower"] = obs["mask_tower"][boards]
     stored_masks["unit"] = unit_mask
     stored_masks["send"] = obs["mask_send"][boards]
+    stored_masks["send_n"] = obs["mask_send_n"][boards]
     stored_masks["spec"] = spec_mask
 
     action["type"][boards] = a_type
@@ -233,6 +365,7 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
     action["tower"][boards] = a_tower
     action["unit"][boards] = a_unit
     action["send"][boards] = a_send
+    action["send_n"][boards] = a_send_n
     action["spec"][boards] = a_spec
 
     cell_mask_all = env.cell_mask(action["type"], action["card"], action["tower"])
@@ -250,10 +383,12 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
             + lp_unit * torch.as_tensor((a_type == A_UPGRADE) | (a_type == A_SELL),
                                         device=DEVICE).float()
             + lp_spec * torch.as_tensor(a_type == A_UPGRADE, device=DEVICE).float()
-            + lp_send * torch.as_tensor(a_type == A_SEND, device=DEVICE).float())
+            + lp_send * torch.as_tensor(a_type == A_SEND, device=DEVICE).float()
+            + lp_send_n * torch.as_tensor(a_type == A_SEND, device=DEVICE).float())
 
     actions_np = {"type": a_type, "card": a_card, "tower": a_tower,
-                  "cell": a_cell, "unit": a_unit, "spec": a_spec, "send": a_send}
+                  "cell": a_cell, "unit": a_unit, "spec": a_spec, "send": a_send,
+                  "send_n": a_send_n}
     return stored_masks, actions_np, logp.cpu().numpy(), value.cpu().numpy()
 
 
@@ -263,8 +398,15 @@ def act(net: Policy, env: VersusEnv, obs: Dict[str, np.ndarray],
 class League:
     """自分・過去のチェックポイント・基準ボットのプール。
 
-    自己対戦だけだと「自分だけ強くなったつもり」に陥る。**動かない基準**
-    （ランダム・貪欲・送り特化）を必ず混ぜて、強くなったかを外から測れるようにする。
+    自己対戦だけだと「自分だけ強くなったつもり」に陥る。**動かない基準**を
+    必ず混ぜて、強くなったかを外から測れるようにする。
+
+    塔の構成が違う 3 種 (``arrow_spam`` / ``big_tower`` / ``splash_mix``) を
+    入れてあるのは、**相手の塔構成が偏っていると方策もそこに閉じる**ため。
+    防衛ベンチ (:mod:`tower_bench`) で測ると、弓だけ 24 基（漏れ率 65%）より
+    大型塔を混ぜた構成（49%）のほうが明確に強いのに、旧リーグの相手は
+    全員が弓しか建てなかった。**倒すべき相手が弓しか知らなければ、
+    弓に勝てるだけの方策で止まる。**
     """
 
     def __init__(self, cfg: TrainConfig, rng: random.Random):
@@ -272,14 +414,45 @@ class League:
         self.rng = rng
         self.checkpoints: List[str] = []
         self.elo = 1000.0
-        self.bots = ("random", "greedy_defense", "income_push")
+        self.bots = ("random", "greedy_defense", "income_push",
+                     "arrow_spam", "big_tower", "splash_mix")
+        #: この世代で相手に使う過去チェックポイント。:meth:`refresh_past_pool`
+        self.past_pool: List[str] = []
+
+    def refresh_past_pool(self) -> None:
+        """この世代で使う過去の自分を ``cfg.past_slots`` 個だけ選ぶ。
+
+        **凍結ネットは 1 つごとに forward が 1 本増える。** 過去 8 個を
+        全部相手にすると、1 step あたり小さなバッチの GPU 呼び出しが 8 本
+        走る。計測では ``act`` は 1 回あたり約 11 ms の固定費（カーネル起動と
+        Python ディスパッチ）を払っていて、島数を増やしてもここは減らない。
+        つまり **相手の種類数はそのまま実時間の税**になる。
+
+        世代ごとに引き直すので、リーグ全体で見れば過去 8 個すべてが相手に
+        なる。1 世代の中で同時に何種類と当たるかだけを絞っている。
+        """
+        k = max(1, int(getattr(self.cfg, "past_slots", 2)))
+        if len(self.checkpoints) <= k:
+            self.past_pool = list(self.checkpoints)
+        else:
+            self.past_pool = self.rng.sample(self.checkpoints, k)
 
     def sample_opponent(self) -> str:
-        if self.rng.random() < self.cfg.bot_ratio or not self.checkpoints:
+        """相手を 1 つ引く。**``bot_ratio`` を額面どおりに守る。**
+
+        以前は ``or not self.checkpoints`` が付いていて、チェックポイントが
+        できる第 ``eval_every`` 世代までは **100% がヒューリスティックボット**
+        になっていた。ボットの手番は方策の推論より一桁重い（カード配置を
+        Theta* で探索するため）ので、いちばん遅い序盤に、いちばん重い相手を、
+        全席に置いていたことになる。過去の自分がまだ居ないなら
+        **自己対戦へ落とす**のが正しい代替で、ボットへ落とす理由は無い。
+        """
+        if self.rng.random() < self.cfg.bot_ratio:
             return self.rng.choice(self.bots)
-        if self.rng.random() < 0.5:
-            return "self"
-        return "past:" + self.rng.choice(self.checkpoints)
+        pool = self.past_pool or self.checkpoints
+        if pool and self.rng.random() < 0.5:
+            return "past:" + self.rng.choice(pool)
+        return "self"
 
     def add_checkpoint(self, path: str) -> None:
         self.checkpoints.append(path)
@@ -309,15 +482,38 @@ def load_frozen(league: "League", frozen: Dict[str, "Policy"]) -> None:
 
 def assign_controllers(env: VersusEnv, league: League,
                        rng: random.Random) -> Dict[str, np.ndarray]:
-    """席ごとに操作者を決める。席 0 は必ず学習中の方策。"""
+    """席ごとに操作者を決める。席 0 は必ず学習中の方策。
+
+    **相手は試合単位ではなく席単位で引く。**
+
+    以前は試合ごとに相手を 1 つ引いて席 1 以降の全部に適用していた。
+    8 人戦でボットを引くと 7 席がボットになり、``bot_ratio`` が 0.35 でも
+    **実際にボットが占める島は 79%** だった（実測: 有効 225 島のうち学習側
+    48 島、残り 177 島がボット）。シミュレーションの費用は全島ぶん払うのに、
+    PPO に入るのは 48 島ぶんだけになる。
+
+    席ごとに引けば ``bot_ratio`` がそのまま「ボットが占める席の割合」になり、
+    同じ計算量から取れる学習サンプルが増える。1 つの試合の中に基準ボットと
+    過去の自分が混ざることになるが、**混ざったほうがリーグとしては素直**で、
+    「相手 8 人全員が同じ弓スパム」のような偏った盤面も消える。
+
+    :envvar:`MAZEWARD_SEAT_OPPONENTS` を 0 にすると試合単位の抽選に戻る。
+    """
     kinds: Dict[str, List[int]] = {}
     learner: List[int] = []
+    per_seat = bool(getattr(league.cfg, "seat_opponents", 1))
+    league.refresh_past_pool()
     for e in range(env.n_envs):
         players = int(env.env_players[e])
-        opponent = league.sample_opponent()
+        match_opponent = None if per_seat else league.sample_opponent()
         for seat in range(players):
             b = e * env.seats + seat
-            if seat == 0 or opponent == "self":
+            if seat == 0:
+                learner.append(b)
+                continue
+            opponent = (league.sample_opponent() if per_seat
+                        else match_opponent)
+            if opponent == "self":
                 learner.append(b)
             else:
                 kinds.setdefault(opponent, []).append(b)
@@ -427,6 +623,7 @@ def ppo_update(net: Policy, opt, buf: Rollout, adv, ret, cfg: TrainConfig):
     ret_t = torch.as_tensor(ret_f, device=DEVICE)
 
     stats = {"loss": [], "kl": [], "entropy": [], "value_loss": []}
+    use_amp = bool(cfg.amp) and AMP_OK
     net.train()
     for _ in range(cfg.epochs):
         np.random.shuffle(idx_all)
@@ -443,7 +640,14 @@ def ppo_update(net: Policy, opt, buf: Rollout, adv, ret, cfg: TrainConfig):
             }
             m_mb = {k: v[mb_t] for k, v in masks_t.items()}
             a_mb = {k: v[mb_t] for k, v in actions_t.items()}
-            logp, ent, value = net.evaluate(obs_mb, m_mb, a_mb)
+            if use_amp:
+                # **損失の計算は fp32 のまま。** autocast は行列積と畳み込みだけを
+                # 低精度に落とし、logsumexp や loss は fp32 で回る
+                with torch.autocast("cuda", dtype=AMP_DTYPE):
+                    logp, ent, value = net.evaluate(obs_mb, m_mb, a_mb)
+                logp, ent, value = logp.float(), ent.float(), value.float()
+            else:
+                logp, ent, value = net.evaluate(obs_mb, m_mb, a_mb)
 
             old = old_logp_t[mb_t]
             advantage = adv_t[mb_t]
@@ -457,9 +661,19 @@ def ppo_update(net: Policy, opt, buf: Rollout, adv, ret, cfg: TrainConfig):
             loss = pg + cfg.value_coef * vloss - cfg.entropy * entropy
 
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm)
-            opt.step()
+            if use_amp and _SCALER is not None:
+                # fp16 は勾配が 0 に潰れるのでスケールしてから逆伝播する。
+                # **勾配クリップの前に必ず戻すこと**（スケールしたまま
+                # ノルムを測ると閾値の意味が変わる）
+                _SCALER.scale(loss).backward()
+                _SCALER.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm)
+                _SCALER.step(opt)
+                _SCALER.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm)
+                opt.step()
 
             with torch.no_grad():
                 kl = (old - logp).mean().item()
@@ -514,6 +728,7 @@ def behaviour_clone(net: Policy, opt, cfg: TrainConfig, rng: random.Random,
                              obs["mask_unit_upgrade"][boards],
                              obs["mask_unit_sell"][boards]),
             "send": obs["mask_send"][boards],
+            "send_n": obs["mask_send_n"][boards],
             "spec": np.ones((len(boards), ACTION_HEADS["spec"]), bool),
             "cell": cell_mask[boards],
         }
@@ -525,7 +740,8 @@ def behaviour_clone(net: Policy, opt, cfg: TrainConfig, rng: random.Random,
                "cell": (a_type == A_CARD) | (a_type == A_TOWER),
                "unit": (a_type == A_UPGRADE) | (a_type == A_SELL),
                "spec": a_type == A_UPGRADE,
-               "send": a_type == A_SEND}
+               "send": a_type == A_SEND,
+               "send_n": a_type == A_SEND}
         for name, sel in use.items():
             if not sel.any():
                 continue
@@ -645,6 +861,22 @@ def evaluate(net: Policy, cfg: TrainConfig, league: League,
         out["win_vs_best"] = 0.5
     out["elo"] = league.elo
 
+    # **方策に依存しない定点観測。** 学習ログの指標は方策が変わるから動くので、
+    # バランスが変わったのか方策が変わったのかを切り分けられない。
+    # 固定のボットで同じ金・同じ波を受けさせて漏れ率だけを測ると、
+    # 方策と無関係にバランスの変化だけが出る（tower_bench の防衛試験）
+    try:
+        import tower_bench
+        probe = {}
+        for name in ("arrow_spam", "big_tower", "support_mix"):
+            r = tower_bench.defense_run(name, games=2, minutes=4.0,
+                                        seed=cfg.seed + gen)
+            probe[name] = round(r["leak_rate"], 4)
+        out["defense_probe"] = probe
+    except Exception as exception:                          # noqa: BLE001
+        # 定点観測が落ちても学習は続ける。指標が 1 つ欠けるだけ
+        print(f"警告: 定点観測に失敗しました: {exception}", flush=True)
+
     # 人数別の勝率。**人数で最適戦略が変わる**ので入れ子 dict で残す
     by_players: Dict[str, float] = {}
     for players in (2, 4, 8):
@@ -667,17 +899,40 @@ def main() -> None:
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
+    install_stop_handlers()
+
     num_envs = cfg.num_envs or pb.auto_num_envs()
+    gens_label = "上限なし（停止するまで）" if cfg.max_gens <= 0 else str(cfg.max_gens)
     print(f"MAZEWARD VERSUS 学習  device={DEVICE}  同時試合={num_envs}  "
-          f"世代={cfg.max_gens}  ランダム化={cfg.randomize:.2f}", flush=True)
+          f"世代={gens_label}  カリキュラム={cfg.curriculum_total()} 世代で 1 周  "
+          f"ランダム化={cfg.randomize:.2f}", flush=True)
     print(f"世代の区切り: ゲーム内 {cfg.gen_early_minutes:.0f} 分以下なら完了率 "
           f"{cfg.gen_finish_early:.0%} / {cfg.gen_early_minutes:.0f} 分以上なら "
           f"{cfg.gen_finish_late:.0%} / {cfg.gen_max_minutes:.0f} 分超で打ち切り",
           flush=True)
+    from mazeward_env import pathfinder as _pf
+    print("経路探索: " + ("numba (JIT)" if _pf._FAST is not None else
+                         "純 Python  ※ pip install numba で約 2 割速くなります"),
+          flush=True)
+    if DEVICE.type == "cuda":
+        amp_name = {torch.bfloat16: "bf16 混合精度", torch.float16: "fp16 混合精度"}
+        mode = amp_name.get(AMP_DTYPE, "fp32") if (cfg.amp and AMP_OK) else "fp32"
+        print(f"PPO 更新: {mode}  ({torch.cuda.get_device_name(0)} / "
+              f"compute {'.'.join(map(str, torch.cuda.get_device_capability()))})",
+              flush=True)
+    else:
+        print("PPO 更新: fp32 (CPU)", flush=True)
     print("1 試合の時間切れ: "
           + (f"{cfg.match_max_min:.0f} 分" if cfg.match_max_min > 0
              else f"なし（世代の打ち切り {cfg.gen_max_minutes:.0f} 分まで走る）"),
           flush=True)
+
+    # **割引率は 1 つしか無い。** ポテンシャル整形 (reward.GAMMA) と PPO
+    # (cfg.gamma) がずれると「方策を変えない」保証が崩れるので、
+    # 環境変数で上書きされていたら整形側へ代入し直す
+    if abs(R.GAMMA - cfg.gamma) > 1e-12:
+        print(f"整形報酬の割引率を {R.GAMMA} → {cfg.gamma} に揃えました", flush=True)
+        R.GAMMA = cfg.gamma
 
     net = Policy().to(DEVICE)
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
@@ -687,15 +942,41 @@ def main() -> None:
     game_minutes_total = 0.0        # ゲーム内の累計経過時間（分）
     frozen: Dict[str, Policy] = {}
     bots = {name: make_bot(name, np.random.default_rng(cfg.seed + i))
-            for i, name in enumerate(("random", "greedy_defense", "income_push"))}
+            for i, name in enumerate(league.bots)}
 
     resume = os.path.join(MODEL_DIR, "ppo_latest.pt")
     pb.recover_data_file(resume)
     start_gen = 1
+    # **バランスの骨格が変わると、そもそも形が合わない。**
+    # 送りの種類数は行動ヘッド send の出力数に、塔のレベル数と送りの種類数は
+    # 観測のスカラー次元に直結している。放っておくと放置学習が
+    # 再開直後の RuntimeError で死ぬので、ここで検知して作り直す。
+    stale = None
     if os.path.exists(resume):
         state = torch.load(resume, map_location=DEVICE, weights_only=False)
-        net.load_state_dict(state["net"])
-        opt.load_state_dict(state["opt"])
+        saved_fp = state.get("balance_fingerprint")
+        # **環境より先に判定する。** 環境を作るのは 1 世代目の直前なので、
+        # ここでは既定バランスの指紋を使う（ドメインランダム化を掛けても
+        # 指紋を比べる基準は既定値のまま——揺らした値で比べたら毎回違う）
+        current_fp = B.default_balance().fingerprint()
+        try:
+            if saved_fp is not None and saved_fp != current_fp:
+                raise RuntimeError(
+                    f"バランスの指紋が違う（保存 {saved_fp} / 現在 {current_fp}）")
+            net.load_state_dict(state["net"])
+            opt.load_state_dict(state["opt"])
+        except (RuntimeError, KeyError, ValueError) as exc:
+            stale = resume + ".stale"
+            os.replace(resume, stale)
+            print(f"※ 既存モデルを引き継げませんでした: {exc}", flush=True)
+            print(f"   観測や行動の形が変わっています（送り {len(B.ATTACKER_ORDER)} 種 / "
+                  f"塔 {B.MAX_TOWER_LEVEL} 段 / スカラー {SCALAR_DIM} 次元）", flush=True)
+            print(f"   旧モデルは {os.path.basename(stale)} に退避し、"
+                  f"第 1 世代から学習し直します", flush=True)
+            print("   経緯は docs/VERSUS_ECONOMY_ja.md", flush=True)
+            net = Policy().to(DEVICE)
+            opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
+    if stale is None and os.path.exists(resume):
         start_gen = state.get("gen", 0) + 1
         league.elo = state.get("elo", 1000.0)
         game_minutes_total = state.get("game_minutes_total", 0.0)
@@ -710,7 +991,8 @@ def main() -> None:
     env_cfg = EnvConfig(num_envs=num_envs, randomize=cfg.randomize,
                         seed=cfg.seed + 1)
     if cfg.curriculum:
-        apply_curriculum(env_cfg, curriculum_stage(start_gen - 1, cfg.max_gens))
+        apply_curriculum(env_cfg,
+                         curriculum_stage(start_gen - 1, cfg.curriculum_total()))
     # カリキュラムが決めた試合上限を、利用者の設定で上書きする。
     # **試合を時間で勝手に切らない**のが既定（match_max_min = 0）
     env_cfg.max_ticks = cfg.match_max_ticks()
@@ -718,9 +1000,14 @@ def main() -> None:
     obs = env.observe()
     last_fingerprint = env.balances[0].fingerprint()
 
-    for gen in range(start_gen, start_gen + cfg.max_gens):
+    # 上限なし（max_gens <= 0）なら数え続ける。終わりは停止要求だけが決める
+    gen_iter = (itertools.count(start_gen) if cfg.max_gens <= 0
+                else range(start_gen, start_gen + cfg.max_gens))
+    gen = start_gen - 1
+    for gen in gen_iter:
         gen_t0 = time.time()
-        stage = curriculum_stage(gen - 1, cfg.max_gens) if cfg.curriculum else len(CURRICULUM) - 1
+        stage = (curriculum_stage(gen - 1, cfg.curriculum_total())
+                 if cfg.curriculum else len(CURRICULUM) - 1)
         wanted = CURRICULUM[stage][0] if cfg.curriculum else "固定"
         if cfg.curriculum and (env.cfg.board_size != CURRICULUM[stage][1]
                                or tuple(env.cfg.players_choices)
@@ -756,7 +1043,16 @@ def main() -> None:
                 env_done_once[info["env"]] = True
 
             adv, ret = compute_gae(buf, last_value, cfg)
+            # **PPO 更新のあいだ進捗行が止まる。** 収集中しか progress を
+            # 出していなかったので、GUI も端末も「固まった」ように見えていた。
+            # 実測では 1 チャンクあたり fp32 で約 9 秒 / 混合精度で約 4.6 秒
+            # （学習島 225・rollout 96・minibatch 1024・epochs 3 = 66 回の更新）
+            upd_t0 = time.time()
+            print(f"[Update] 第 {gen} 世代 チャンク {chunk + 1}/{max_chunks} "
+                  f"学習中 … 学習島 {n_learner} x {cfg.rollout} step", flush=True)
             chunk_losses.append(ppo_update(net, opt, buf, adv, ret, cfg))
+            print(f"[Update] 第 {gen} 世代 チャンク {chunk + 1}/{max_chunks} "
+                  f"完了 ({time.time() - upd_t0:.1f} 秒)", flush=True)
 
             game_minutes = (steps_total * ticks_per_step
                             / B.TICKS_PER_SECOND / 60.0)
@@ -764,6 +1060,11 @@ def main() -> None:
             stop, reason = generation_done(game_minutes, completion, cfg)
             if stop:
                 stop_reason = reason
+                break
+            # **塊の切れ目で抜ける。** ここまでの更新は済んでいるので、
+            # このあとの保存にちゃんと入る
+            if STOP.is_set():
+                stop_reason = "停止要求"
                 break
         else:
             stop_reason = f"塊の上限 {max_chunks} に到達"
@@ -796,6 +1097,21 @@ def main() -> None:
             "balance_fingerprint": env.balances[0].fingerprint(),
         }
         if infos:
+            # ---- バランス用の指標は「各枠の最初の 1 試合」だけで取る ----
+            # **固定のゲーム内時間で区切ると、短い試合ほど多くサンプルに入る。**
+            # 長さ L の試合は 1/L の重みで入るので、決着の速い試合が過大に出る。
+            # 学習データは全部使う（PPO は試合の切れ目を気にしないし、
+            # 全枠の決着を待つと実測で 31% が遊休になる）が、
+            # **「典型的な 1 試合はどうだったか」を測る側は 1 枠 1 票**にする
+            seen: set = set()
+            fair = []
+            for info in infos:
+                e = int(info["env"])
+                if e not in seen:
+                    seen.add(e)
+                    fair.append(info)
+            metrics["fair_games"] = len(fair)
+
             metrics["finish_rate"] = float(np.mean([i["decided"] for i in infos]))
             # 「時間切れで打ち切られた割合」。ここが高いと、試合が
             # 実力で決着せずタイマーで終わっていることになる
@@ -812,11 +1128,83 @@ def main() -> None:
             # 辞書型集計 (平均化)
             for dict_key in ("tower_type_rates", "send_type_rates", "leak_type_rates"):
                 merged = {}
-                for info in infos:
+                for info in fair:
                     sub = info.get(dict_key, {})
                     for k, v in sub.items():
-                        merged[k] = merged.get(k, 0.0) + v / len(infos)
+                        merged[k] = merged.get(k, 0.0) + v / len(fair)
                 metrics[dict_key] = merged
+
+            # ---- 勝った側 / 負けた側で分ける ----------------------
+            # **平均だけだと「どの構成が勝つのか」を後から問えない。**
+            # バランス判断で見たいのはここで、平均は勝者と敗者を混ぜてしまう
+            # ---- 分布。**平均だけだと形が消える** --------------------
+            # 大勝ちと大負けを繰り返す戦略と、いつも引き分ける戦略が
+            # 平均では同じに見える。バランスを見るときはここが要る
+            for key, vals in (("leaks", [i["leaks"] for i in fair]),
+                              ("towers", [i["towers"] for i in fair]),
+                              ("income", [i["income"] for i in fair]),
+                              ("path_length", [i["path_length"] for i in fair]),
+                              ("ticks", [i["ticks"] for i in fair])):
+                p10, p50, p90 = np.percentile(vals, [10, 50, 90])
+                metrics[f"{key}_p10"] = float(p10)
+                metrics[f"{key}_p50"] = float(p50)
+                metrics[f"{key}_p90"] = float(p90)
+
+            rows = [ps for i in fair for ps in i.get("per_seat", [])]
+            for label, sel in (("winner", [r for r in rows if r["won"]]),
+                               ("loser", [r for r in rows if not r["won"]])):
+                if not sel:
+                    continue
+                for key in ("towers", "tower_avg_level", "income", "sends",
+                            "leaks", "path_length", "path_threat", "kills"):
+                    metrics[f"{label}_{key}"] = float(np.mean([r[key] for r in sel]))
+                rates = [r["leak_rate"] for r in sel if r["leak_rate"] is not None]
+                if rates:
+                    metrics[f"{label}_leak_rate"] = float(np.mean(rates))
+                total = sum(sum(r["tower_counts"].values()) for r in sel)
+                mix = {}
+                for r in sel:
+                    for k, v in r["tower_counts"].items():
+                        mix[k] = mix.get(k, 0.0) + v / max(total, 1)
+                metrics[f"{label}_tower_mix"] = mix
+
+            # ---- 塔の種類ごとの功績 ------------------------------
+            # **バランス判断の本命。** 構成比だけだと「よく建てられている」しか
+            # 分からず、その塔が実際に仕事をしたかが残らない。監視塔と呪詛塔は
+            # 自分では 1 ダメージも出さないので、構成比では永久に評価できない
+            dmg_sum: Dict[str, float] = {}
+            kill_sum: Dict[str, float] = {}
+            built_sum: Dict[str, float] = {}
+            for r in rows:
+                for k, v in r.get("damage_by_kind", {}).items():
+                    dmg_sum[k] = dmg_sum.get(k, 0.0) + v
+                for k, v in r.get("kills_by_kind", {}).items():
+                    kill_sum[k] = kill_sum.get(k, 0.0) + v
+                for k, v in r.get("tower_counts", {}).items():
+                    built_sum[k] = built_sum.get(k, 0.0) + v
+            grand = sum(dmg_sum.values())
+            if grand > 0:
+                metrics["damage_share_by_kind"] = {k: v / grand
+                                                   for k, v in dmg_sum.items()}
+                # **1 本あたりの与ダメージ。** 「その塔は建てる価値があるか」に
+                # いちばん近い数字で、コストで割ればそのまま釣り合いの指標になる
+                metrics["damage_per_tower_by_kind"] = {
+                    k: dmg_sum[k] / built_sum[k]
+                    for k in dmg_sum if built_sum.get(k, 0) > 0}
+                metrics["kills_by_kind"] = kill_sum
+
+            # 送りの種類ごとの突破率。「送って通るのか」を種類別に残す
+            bt: Dict[str, List[float]] = {}
+            for i in fair:
+                for k, v in i.get("breakthrough_rates", {}).items():
+                    if v is not None:
+                        bt.setdefault(k, []).append(v)
+            if bt:
+                metrics["breakthrough_rates"] = {k: float(np.mean(v))
+                                                 for k, v in bt.items()}
+            # 敵の同時上限で捨てた湧き。0 でないと守りが不当に強く見える
+            metrics["spawn_dropped"] = float(np.mean(
+                [i.get("spawn_dropped", 0.0) for i in infos]))
 
             drawn = sum(i["cards_drawn"] for i in infos)
             metrics["card_usage_rate"] = (sum(i["cards_played"] for i in infos)
@@ -829,7 +1217,8 @@ def main() -> None:
             metrics["balance_changed"] = True
             last_fingerprint = fingerprint
 
-        if gen % cfg.eval_every == 0 or gen == start_gen + cfg.max_gens - 1:
+        last_gen = cfg.max_gens > 0 and gen == start_gen + cfg.max_gens - 1
+        if not STOP.is_set() and (gen % cfg.eval_every == 0 or last_gen):
             metrics.update(evaluate(net, cfg, league, best_net, gen))
             score = float(metrics.get("win_vs_random", 0.0))
             if score > best_score:
@@ -849,10 +1238,17 @@ def main() -> None:
 
         torch.save({"net": net.state_dict(), "opt": opt.state_dict(), "gen": gen,
                     "elo": league.elo, "checkpoints": league.checkpoints,
+                    "balance_fingerprint": B.default_balance().fingerprint(),
                     "game_minutes_total": game_minutes_total}, resume)
         pb.persist_data_file(resume)
 
-    print("学習を完了しました", flush=True)
+        if STOP.is_set():
+            break
+
+    if STOP.is_set():
+        print(f"停止要求により第 {gen} 世代で終了しました（保存済み）", flush=True)
+    else:
+        print("学習を完了しました", flush=True)
 
 
 if __name__ == "__main__":

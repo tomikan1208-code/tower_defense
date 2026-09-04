@@ -111,6 +111,7 @@ class Policy(nn.Module):
         self.head_unit = nn.Linear(hidden, ACTION_HEADS["unit"])
         self.head_spec = nn.Linear(hidden, ACTION_HEADS["spec"])
         self.head_send = nn.Linear(hidden, ACTION_HEADS["send"])
+        self.head_send_n = nn.Linear(hidden, ACTION_HEADS["send_n"])
         # セルヘッドだけは盤面の解像度を保ったまま出す。
         # 全結合で 729 個を出すと「どこに置くか」の空間構造が壊れる
         self.cell_film = nn.Linear(hidden, width)
@@ -135,6 +136,7 @@ class Policy(nn.Module):
             "unit": self.head_unit(fused),
             "spec": self.head_spec(fused),
             "send": self.head_send(fused),
+            "send_n": self.head_send_n(fused),
             "cell": cell_map.flatten(1),
         }
         return logits, self.value(fused).squeeze(-1)
@@ -143,8 +145,38 @@ class Policy(nn.Module):
     @staticmethod
     def _logp_entropy(logits: torch.Tensor, mask: torch.Tensor,
                       action: torch.Tensor):
-        dist = torch.distributions.Categorical(logits=masked_logits(logits, mask))
-        return dist.log_prob(action), dist.entropy()
+        """log 確率と entropy。**``Categorical`` を作らない。**
+
+        ``torch.distributions.Categorical`` は生成のたびに引数検証と正規化を
+        走らせるうえ、``log_prob`` と ``entropy`` でそれぞれ ``logsumexp`` を
+        引き直す。ヘッドが 7 本あって PPO の epoch ぶん繰り返すので、
+        プロファイルでは分布まわりだけで全体の 1 割近くを占めていた。
+        ここは正規化を 1 回で済ませて gather するだけでよい。
+
+        :func:`masked_logits` は禁止手を ``-1e9``（``-inf`` ではない）で埋める
+        ので、``exp`` は 0 になり、``0 * -1e9 = 0`` で NaN も出ない。
+        """
+        ml = masked_logits(logits, mask)
+        logp_all = ml - ml.logsumexp(dim=-1, keepdim=True)
+        logp = logp_all.gather(-1, action.unsqueeze(-1)).squeeze(-1)
+        entropy = -(logp_all.exp() * logp_all).sum(dim=-1)
+        return logp, entropy
+
+    @staticmethod
+    def sample(logits: torch.Tensor, mask: torch.Tensor,
+               greedy: bool = False):
+        """マスク付きで 1 手引く。``(行動, log 確率)`` を返す。
+
+        :meth:`_logp_entropy` と同じ理由で分布オブジェクトを作らない。
+        サンプリングと log 確率で ``logsumexp`` を 1 回だけ使う。
+        """
+        ml = masked_logits(logits, mask)
+        logp_all = ml - ml.logsumexp(dim=-1, keepdim=True)
+        if greedy:
+            action = logp_all.argmax(dim=-1)
+        else:
+            action = torch.multinomial(logp_all.exp(), 1).squeeze(-1)
+        return action, logp_all.gather(-1, action.unsqueeze(-1)).squeeze(-1)
 
     def evaluate(self, obs: Dict[str, torch.Tensor],
                  masks: Dict[str, torch.Tensor],
@@ -174,6 +206,7 @@ class Policy(nn.Module):
         add("unit", (a_type == A_UPGRADE) | (a_type == A_SELL))
         add("spec", a_type == A_UPGRADE)
         add("send", a_type == A_SEND)
+        add("send_n", a_type == A_SEND)
         return logp, ent, value
 
 

@@ -45,16 +45,21 @@ public final class AiSim {
         MinecraftServer.init();
         int players = 2;
         boolean wantBrain = false;
-        for (String arg : args) {
-            if (arg.equals("--brain")) {
-                wantBrain = true;
-            } else {
-                players = Integer.parseInt(arg);
+        String model = null;
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case "--brain" -> wantBrain = true;
+                case "--model" -> {
+                    // モデルを指定するなら当然ブリッジが要る
+                    model = args[++i];
+                    wantBrain = true;
+                }
+                default -> players = Integer.parseInt(args[i]);
             }
         }
 
         checkClock();
-        BrainClient brain = wantBrain ? connect() : null;
+        BrainClient brain = wantBrain ? connect(model) : null;
         simulate(players, 4242L, brain);
 
         if (brain != null) {
@@ -68,16 +73,38 @@ public final class AiSim {
         System.exit(1);
     }
 
-    /** ブリッジへ繋ぎに行く。数秒待って駄目なら諦める（貪欲ボットで走る）。 */
-    private static BrainClient connect() {
+    /**
+     * ブリッジへ繋ぎに行く。立っていなければ自分で起動する。
+     *
+     * <p>ゲームと同じ {@code ensureBrainProcess} を通すので、
+     * <b>自動起動そのものの検証</b> にもなる（子プロセスの文字コード設定を
+     * 間違えると、日本語のログ 1 行で Python が落ちる）。</p>
+     */
+    private static BrainClient connect(String model) {
         BrainClient brain = BrainClient.openDefault();
-        for (int i = 0; i < 60 && !brain.available(); i++) {
+        for (int i = 0; i < 10 && !brain.available(); i++) {
             sleep(100);
         }
-        System.out.println(brain.available()
-                ? "  ブリッジに接続: " + brain.name()
-                : "  ブリッジに繋がらないので貪欲ボットで走ります");
-        return brain.available() ? brain : null;
+        if (!brain.available() && brain.ensureBrainProcess()) {
+            System.out.println("  ブリッジが居ないので起動しました（torch の読み込み待ち）");
+        }
+        for (int i = 0; i < 400 && !brain.available(); i++) {
+            sleep(100);
+        }
+        if (!brain.available()) {
+            System.out.println("  ブリッジに繋がらないので貪欲ボットで走ります");
+            return null;
+        }
+        if (model != null) {
+            brain.selectModel(model);
+            // 切り替えは非同期。反映されるまで待ってから試合を始める
+            for (int i = 0; i < 50 && !brain.modelLabel().startsWith(model); i++) {
+                sleep(100);
+            }
+        }
+        System.out.println("  ブリッジに接続: " + brain.name());
+        System.out.println("  選べるモデル: " + String.join(", ", brain.models()));
+        return brain;
     }
 
     // ================================================================ 時計
