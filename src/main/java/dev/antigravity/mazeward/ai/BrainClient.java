@@ -11,6 +11,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -52,18 +53,34 @@ public final class BrainClient implements AiPolicy {
     private final String host;
     private final int port;
     private final Thread worker;
-    private final ArrayBlockingQueue<String> outbox = new ArrayBlockingQueue<>(2);
+    /**
+     * 送信待ち。状態の要求だけでなく、モデルの切り替えなどの指示も同じ列に積む。
+     *
+     * <p>枠が 2 しか無かったときは、指示が要求に押し出されて
+     * 「選んだのに切り替わらない」ことがあった。指示は小さいので枠を広げてある。</p>
+     */
+    private final ArrayBlockingQueue<String> outbox = new ArrayBlockingQueue<>(8);
     private final ConcurrentLinkedQueue<List<AiAction.Seated>> inbox = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final AtomicInteger pendingId = new AtomicInteger(0);
-    private final AtomicReference<String> label = new AtomicReference<>("学習済み方策");
+    private final AtomicReference<String> label = new AtomicReference<>("（未接続）");
     private final AtomicReference<Socket> socket = new AtomicReference<>();
+
+    /** 使いたいモデルのファイル名。接続し直しても選び直さなくて済むよう覚えておく。 */
+    private final AtomicReference<String> desiredModel = new AtomicReference<>();
+
+    /** 直近の失敗理由。ゲーム内の {@code !ai} で出す。 */
+    private final AtomicReference<String> lastError = new AtomicReference<>("");
+
+    /** ブリッジが持っているモデルの一覧。接続時に取りに行く。 */
+    private final List<String> models = Collections.synchronizedList(new ArrayList<>());
 
     private volatile long pendingSince;
     private volatile int failures;
     private volatile boolean gaveUp;
+    private volatile boolean everConnected;
     private Process brainProcess;
 
     public BrainClient(String host, int port) {
@@ -91,11 +108,74 @@ public final class BrainClient implements AiPolicy {
      *
      * <p>Python 側は torch の読み込みで数秒かかる。そのあいだ「学習済み方策」と
      * 出したままだと、実際には貪欲ボットが打っているのに
-     * 「学習した AI のはずなのに弱い」という誤解を生む。</p>
+     * 「学習した AI のはずなのに弱い」という誤解を生む。
+     * <b>いま実際に手を打っているのが何なのか</b> を、そのまま名前にする。</p>
      */
     @Override
     public String name() {
-        return connected.get() ? label.get() : label.get() + "（接続待ち）";
+        if (connected.get()) {
+            return "学習済み方策 " + label.get();
+        }
+        if (gaveUp) {
+            return "ブリッジ不通";
+        }
+        return "ブリッジ接続待ち";
+    }
+
+    /** ブリッジが読み込んでいるモデル名（{@code ppo_latest.pt gen20} など）。 */
+    public String modelLabel() {
+        return label.get();
+    }
+
+    /** ブリッジが持っているモデルの一覧。まだ取れていなければ空。 */
+    public List<String> models() {
+        synchronized (models) {
+            return List.copyOf(models);
+        }
+    }
+
+    /**
+     * 使うモデルを選ぶ。
+     *
+     * <p>まだ繋がっていなければ覚えておいて、繋がった瞬間に送る。
+     * <b>「起動が終わるまで選べない」より「選んでおけば反映される」ほうがいい。</b></p>
+     */
+    public void selectModel(String fileName) {
+        desiredModel.set(fileName);
+        if (connected.get()) {
+            outbox.offer("use " + fileName);
+        }
+    }
+
+    /** いま選ばれているモデル名（未選択なら null）。 */
+    public String selectedModel() {
+        return desiredModel.get();
+    }
+
+    /**
+     * 状態の内訳。ゲーム内の {@code !ai} でそのまま出す。
+     *
+     * <p>「AI が弱い」ときに知りたいのは、<b>方策が動いていないのか、
+     * 方策が弱いのか</b> の区別。それが分かる材料だけを並べる。</p>
+     */
+    public List<String> status() {
+        List<String> lines = new ArrayList<>();
+        lines.add("接続先: " + host + ":" + port
+                + (connected.get() ? " — 接続中" : gaveUp ? " — 諦めました" : " — 未接続"));
+        lines.add("モデル: " + (connected.get() ? label.get() : "（未取得）")
+                + (desiredModel.get() == null ? "" : "  / 選択: " + desiredModel.get()));
+        lines.add("プロセス: " + (brainProcess == null ? "自動起動していない"
+                : brainProcess.isAlive() ? "起動中 (pid " + brainProcess.pid() + ")"
+                        : "終了 (exit " + brainProcess.exitValue() + ")"));
+        lines.add("失敗回数: " + failures + "/" + MAX_FAILURES
+                + (everConnected ? "  （一度は接続できました）" : ""));
+        if (!lastError.get().isEmpty()) {
+            lines.add("直近のエラー: " + lastError.get());
+        }
+        if (!models().isEmpty()) {
+            lines.add("選べるモデル: " + String.join(", ", models()));
+        }
+        return lines;
     }
 
     @Override
@@ -162,8 +242,11 @@ public final class BrainClient implements AiPolicy {
         while (running.get()) {
             if (!connected.get()) {
                 if (gaveUp || !connect()) {
+                    // 自動起動した Python は torch の読み込みで数秒かかる。
+                    // 待ち時間を伸ばしすぎると、立ち上がっているのに
+                    // 「まだ貪欲ボット」の時間が無駄に延びる
                     sleep(backoff);
-                    backoff = Math.min(backoff * 2, 8000);
+                    backoff = Math.min(backoff * 2, 2000);
                     continue;
                 }
                 backoff = 500;
@@ -199,13 +282,22 @@ public final class BrainClient implements AiPolicy {
             open.connect(new InetSocketAddress(host, port), 1000);
             socket.set(open);
             connected.set(true);
+            everConnected = true;
             failures = 0;
             Thread reader = new Thread(() -> readLoop(open), "mazeward-brain-reader");
             reader.setDaemon(true);
             reader.start();
+            // 繋ぎ直したときも、選んでおいたモデルに戻す
+            models.clear();
+            outbox.offer("models");
+            String wanted = desiredModel.get();
+            if (wanted != null) {
+                outbox.offer("use " + wanted);
+            }
             System.out.println("[MAZEWARD] AI ブリッジに接続しました " + host + ":" + port);
             return true;
         } catch (IOException exception) {
+            lastError.set("接続できません: " + exception.getMessage());
             return false;
         }
     }
@@ -221,8 +313,28 @@ public final class BrainClient implements AiPolicy {
                     label.set(line.substring(6).trim());
                     continue;
                 }
+                if (line.startsWith("model ")) {
+                    String name = line.substring(6).trim();
+                    synchronized (models) {
+                        if (!models.contains(name)) {
+                            models.add(name);
+                        }
+                    }
+                    continue;
+                }
+                if (line.equals("endmodels")) {
+                    continue;
+                }
                 if (line.startsWith("err ")) {
-                    System.out.println("[MAZEWARD] AI ブリッジ: " + line.substring(4));
+                    // err <要求番号> <理由>。番号は表示に要らないので落とす
+                    String reason = line.substring(4).trim();
+                    int space = reason.indexOf(' ');
+                    if (space > 0 && reason.substring(0, space).chars()
+                            .allMatch(Character::isDigit)) {
+                        reason = reason.substring(space + 1);
+                    }
+                    lastError.set(reason);
+                    System.out.println("[MAZEWARD] AI ブリッジ: " + reason);
                     pendingId.set(0);
                     continue;
                 }
@@ -273,6 +385,7 @@ public final class BrainClient implements AiPolicy {
 
     private void noteFailure(String reason) {
         failures++;
+        lastError.set(reason);
         System.out.println("[MAZEWARD] AI ブリッジの不調 (" + failures + "/" + MAX_FAILURES
                 + "): " + reason);
         if (failures >= MAX_FAILURES) {
@@ -321,8 +434,11 @@ public final class BrainClient implements AiPolicy {
         }
         File script = new File("ai/mc_brain.py");
         if (!script.isFile()) {
-            System.out.println("[MAZEWARD] " + script.getAbsolutePath()
-                    + " が見つかりません。貪欲ボットで続行します");
+            // サーバーをプロジェクト直下以外から起動すると相対パスが外れる。
+            // 「見つからない」だけだと原因に辿り着けないので、探した場所を出す
+            String reason = script.getAbsolutePath() + " が見つかりません";
+            lastError.set(reason);
+            System.out.println("[MAZEWARD] " + reason + "。貪欲ボットで続行します");
             return false;
         }
         String python = System.getenv("MAZEWARD_PYTHON");
@@ -333,15 +449,35 @@ public final class BrainClient implements AiPolicy {
             ProcessBuilder builder = new ProcessBuilder(python, "mc_brain.py",
                     "--port", String.valueOf(port));
             builder.directory(new File("ai"));
+            // **日本語 Windows では必須。** 何も指定しないと子プロセスの標準出力が
+            // cp932 になり、Python が日本語のログを 1 行出した瞬間に
+            // UnicodeEncodeError で落ちる。落ちても試合は貪欲ボットで続くので、
+            // 画面には「AI が弱い」としか出ず原因に辿り着けない（実際に踏んだ）
+            builder.environment().put("PYTHONIOENCODING", "utf-8");
+            builder.environment().put("PYTHONUTF8", "1");
             builder.inheritIO();
             brainProcess = builder.start();
             gaveUp = false;
             failures = 0;
+            // Windows の python は「ストアを開くだけの偽物」が PATH に居ることがある。
+            // その場合すぐ終了するので、繋がらない理由として残す
+            // （黙って貪欲ボットになると、python が無いことに気付けない）
+            brainProcess.onExit().thenAccept(dead -> {
+                String reason = "python が終了しました (exit " + dead.exitValue() + ")";
+                if (!connected.get()) {
+                    lastError.set(reason + " — python が PATH にあるか、"
+                            + "torch が入っているか確認してください");
+                }
+                System.out.println("[MAZEWARD] AI ブリッジの " + reason);
+            });
             System.out.println("[MAZEWARD] AI ブリッジを起動しました（" + python
                     + " ai/mc_brain.py --port " + port + "）");
             return true;
         } catch (IOException exception) {
-            System.out.println("[MAZEWARD] AI ブリッジを起動できません: " + exception.getMessage());
+            String reason = python + " を起動できません: " + exception.getMessage()
+                    + "（MAZEWARD_PYTHON で実行ファイルを指定できます）";
+            lastError.set(reason);
+            System.out.println("[MAZEWARD] AI ブリッジを起動できません: " + reason);
             return false;
         }
     }

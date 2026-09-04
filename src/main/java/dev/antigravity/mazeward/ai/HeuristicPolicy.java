@@ -33,11 +33,18 @@ public final class HeuristicPolicy implements AiPolicy {
     /** 壁の置き場所を探す試行回数。全マス全回転を試すと 1 手に数千回の経路探索になる。 */
     private static final int CARD_TRIES = 48;
 
-    /** 送るときに手元へ残すコイン。使い切ると塔が建たなくなる。 */
-    private static final int SEND_RESERVE = 40;
+    /**
+     * 守りに残す予備費を「次の 1 手ぶんのコスト」の何倍にするか。
+     *
+     * <p><b>定額にしない。</b> 強化費は 1 段ごとに 2.6 倍で伸びるので、
+     * 定額の予備費（旧: 40 コイン）は数分で実質ゼロになり、
+     * 「余ったら送る」が「常に送る」に化ける。</p>
+     */
+    private static final double DEFENCE_RESERVE_RATIO = 1.0;
 
-    /** これだけストックが貯まるまで送らない。重い送りを撃てる体にしておくため。 */
-    private static final int STOCK_FLOOR = 20;
+    /** 塔がこれだけ建つまでは、守りへ多めに残す。 */
+    private static final int EARLY_TOWERS = 12;
+
 
     private final Random random = new Random();
     private final List<AiAction.Seated> ready = new ArrayList<>();
@@ -97,6 +104,22 @@ public final class HeuristicPolicy implements AiPolicy {
      * 置いた版は 25 分でタワー 5 基・送り 1000 回という盤面になった）。
      * 守りに使い切れなかったぶんだけを送りに回す形にすると、
      * 「固めてから伸ばす」という人間が最初に覚える形になる。</p>
+     *
+     * <p><b>ただし 1 つだけ例外を置く。</b> 強化費はいちばん安い段が
+     * 常に手の届く額なので、順番どおりだと「毎秒どれかを強化する」だけで
+     * 送りに一度も到達しない。実際にそうなって、25 分でインカム 22・
+     * 送り 11 回・全員引き分けという試合になった。</p>
+     *
+     * <p>そこで <b>ストックが満タンになったとき</b>（＝これ以上溜められず、
+     * 回復ぶんを捨てている状態）と、<b>盤面を建て切ったとき</b>だけ、
+     * 送りを先に見る。ストックは毎秒 1 しか回復せず、これが送りの持続レートそのもの。
+     * 満タンになるまで 30 秒かかるので、そのあいだは建設が手を持つ。
+     * 送るとストックが減り、次は自然に建設側へ戻る。
+     *
+     * <p>半分（15）で割り込ませた版は、少しずつしか減らないので
+     * 送り分岐が毎秒立ち続け、塔が下限の 10 基で固まった。</p>
+     * 絶対値の閾値（コイン 400 など）を置かないのは、経済が指数で伸びるため
+     * ——固定値は数分で常に真になり、分岐が死ぬ。</p>
      */
     private AiAction decide(VersusMatch match, VersusPlayer player) {
         Island island = player.island();
@@ -104,6 +127,26 @@ public final class HeuristicPolicy implements AiPolicy {
         AiAction card = bestCard(player, island);
         if (card != null) {
             return card;
+        }
+        if (player.stock() >= VersusPlayer.MAX_STOCK
+                || island.towers().size() >= Island.MAX_TOWERS) {
+            // **ここでは予備費を引かない。** 引くと、いちばん安い強化
+            // （弓塔 27 コイン）と予備費（30）が同じ桁なので、
+            // 強化がコインを先に食い尽くして送りの条件が永久に立たない。
+            // 送るとストックが減り、次は自然に建設側へ戻る。
+            //
+            // **体数のほうには予備費を効かせる。** 判定と体数で分けるのが肝で、
+            // 両方に効かせると分岐が立たず（上記）、両方外すと今度は
+            // コインを全部送りに吸われてタワーが 4 基しか建たなくなる。
+            // 判定は予備費なし・**体数には予備費あり**。
+            // 判定にも効かせると、いちばん安い強化（弓塔 27 コイン）と
+            // 予備費が同じ桁なので分岐が永久に立たない。
+            // 両方外すとコインを全部送りに吸われて塔が建たない。
+            // 「1 体は必ず送る、余っていれば増やす」が釣り合う
+            AttackerKind invest = bestSend(player, match, 0);
+            if (invest != null) {
+                return new AiAction.Send(invest, batchSize(player, match, invest));
+            }
         }
         AiAction tower = bestTower(player, island);
         if (tower != null) {
@@ -115,37 +158,89 @@ public final class HeuristicPolicy implements AiPolicy {
         }
         AttackerKind send = bestSend(player, match);
         if (send != null) {
-            return new AiAction.Send(send);
+            return new AiAction.Send(send, batchSize(player, match, send));
         }
         return new AiAction.Skip();
     }
 
     /**
-     * 送れるもののうち、いちばん高いもの。インカムがいちばん伸びる。
+     * 何を送るか。<b>「毎秒 1 回の送りで使い切れる額」を基準に選ぶ。</b>
+     *
+     * <p>ストックは毎秒 1 しか回復せず消費はどれも 1 なので、送れる回数は
+     * 1 秒 1 回で頭打ち。一方コインは毎秒 {@code インカム / 収入間隔} 増える。
+     * だから <b>その額を 1 回で使い切れる、いちばん高いインカムモブ</b> が最適になる。
+     * 安いと送る回数が足りずコインが余り、高いと貯める時間ぶん送る回数が減るうえ、
+     * 梯子は上ほどインカム比率が悪いので二重に損。
+     * 貯まったぶんは収入 1 回ぶんの時間で吐き出す項として足す
+     * （梯子は飛び飛びなので、収入ぴったりで切ると死蔵される帯ができる）。</p>
+     *
+     * <p>実測: この式が income 73、「買える中でいちばん高いもの」が income 49。
+     * 回数あたりで選ぶほうが良さそうに見えて、比率の悪化で負ける。</p>
      *
      * <p>守りが薄いうちは多めに手元へ残す。序盤に送り切ると、
      * 返ってきた敵を受けきれずに自分が先に溶ける。</p>
      */
     private AttackerKind bestSend(VersusPlayer player, VersusMatch match) {
-        if (match.preparing()) {
+        return bestSend(player, match, defenceReserve(player));
+    }
+
+    private AttackerKind bestSend(VersusPlayer player, VersusMatch match,
+                                  int reserve) {
+        if (match.preparing() || player.stock() < 1) {
             return null;
         }
-        // ストックが貯まるまで待つ。毎秒 1 回復しかしないので、
-        // 買えるたびに送ると **ストック 1 の雑魚しか送れない体** になり、
-        // 相手のタワーに溶けるだけの送りを延々と続けることになる
-        if (player.stock() < STOCK_FLOOR) {
+        double budget = player.coins() - reserve;
+        if (budget <= 0) {
             return null;
         }
-        int reserve = player.island().towers().size() < 12
-                ? SEND_RESERVE * 3 : SEND_RESERVE;
-        List<AttackerKind> options = AttackerKind.unlockedAt(player.income());
-        for (int i = options.size() - 1; i >= 0; i--) {
-            AttackerKind kind = options.get(i);
-            if (player.canSend(kind) && player.coins() - kind.cost() >= reserve) {
-                return kind;
+        double ceiling = (player.income() + player.coins())
+                / (double) Math.max(1, match.incomeSeconds());
+        AttackerKind best = null;
+        for (AttackerKind kind : AttackerKind.unlockedAt(player.income())) {
+            if (kind.incomeGain() <= 0 || !player.canSend(kind)
+                    || kind.cost() > budget) {
+                continue;
+            }
+            // 使い切れる範囲でいちばん高いもの。届かないうちはいちばん安いもの
+            if (best == null || (kind.cost() <= ceiling && kind.cost() > best.cost())) {
+                best = kind;
             }
         }
-        return null;
+        return best;
+    }
+
+    /** 守りに残す額。次に建てる／強化する 1 手ぶん。 */
+    private int defenceReserve(VersusPlayer player) {
+        Island island = player.island();
+        int towers = island.towers().size();
+        int base = Integer.MAX_VALUE;
+        for (TowerKind kind : TowerKind.values()) {
+            base = Math.min(base, kind.baseCost());
+        }
+        double reserve = base * DEFENCE_RESERVE_RATIO;
+        if (towers < EARLY_TOWERS) {
+            reserve *= 3;
+        }
+        return (int) Math.round(reserve);
+    }
+
+    /**
+     * 何体まとめて送るか。買えるだけ送って、残りの手を建設へ回す。
+     *
+     * <p>持続レートはストック回復（毎秒 1）で決まるのでまとめても総数は増えない。
+     * 増えるのは <b>空く手数</b> のほう。</p>
+     */
+    private int batchSize(VersusPlayer player, VersusMatch match, AttackerKind kind) {
+        return batchSize(player, match, kind, defenceReserve(player));
+    }
+
+    private int batchSize(VersusPlayer player, VersusMatch match, AttackerKind kind,
+                          int reserve) {
+        int budget = (int) Math.max(0, player.coins() - reserve);
+        int byCoins = budget / Math.max(1, kind.cost());
+        int byStock = player.stock() / Math.max(1, kind.stockCost());
+        return Math.max(1, Math.min(Math.min(byCoins, byStock),
+                VersusMatch.MAX_SEND_BATCH));
     }
 
     /** 経路がいちばん伸びる置き方。伸びないなら置かない（壁は撤去できない）。 */
@@ -250,6 +345,13 @@ public final class HeuristicPolicy implements AiPolicy {
      * 直後に敵が来ても何も置けない。</p>
      */
     private AiAction bestUpgrade(VersusPlayer player, Island island) {
+        // **盤面を埋めるまで強化しない。** 強化はいちばん安い段が常に手の届く額なので、
+        // 建設と同列に置くと毎秒そちらへ流れ、塔の数が下限で止まる
+        // （実測でちょうど MIN_DEFENCE_TOWERS の 10 基で固まった）。
+        // 数を並べてから伸ばす順にすると、予備費が新しい塔のぶんとして残る
+        if (island.towers().size() < Island.MAX_TOWERS) {
+            return null;
+        }
         List<Vec2i> path = pathCells(island);
         List<TowerInstance> towers = island.towers();
         int bestIndex = -1;

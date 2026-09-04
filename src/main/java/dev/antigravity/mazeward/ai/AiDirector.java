@@ -9,6 +9,7 @@ import dev.antigravity.mazeward.versus.VersusMatch;
 import dev.antigravity.mazeward.versus.VersusPlayer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * AI が操作している席をまとめて動かす。
@@ -38,6 +39,7 @@ public final class AiDirector {
     private final HeuristicPolicy fallback = new HeuristicPolicy();
     private final BrainClient brain;
     private int lastDecisionTick = -DECISION_TICKS;
+    private Consumer<String> policyListener;
 
     /**
      * @param brain 学習済み方策への接続。null なら最初から貪欲ボットで回す
@@ -125,6 +127,9 @@ public final class AiDirector {
      *
      * <p>試合の途中で頭がすり替わるのは乱暴に見えるが、
      * <b>途中で AI が止まって案山子になるほうが観戦としては壊れている</b>。</p>
+     *
+     * <p>切り替わったことは必ず外へ知らせる。黙って入れ替わると、
+     * プレイヤーには「AI が急に弱く（強く）なった」としか見えない。</p>
      */
     private void switchPolicyIfNeeded() {
         if (brain == null) {
@@ -132,10 +137,24 @@ public final class AiDirector {
         }
         if (brain.available() && policy != brain) {
             policy = brain;
-            System.out.println("[MAZEWARD] AI の頭を学習済み方策へ切り替えました");
+            announce("AI の頭を " + policy.name() + " に切り替えました");
         } else if (!brain.available() && policy != fallback) {
             policy = fallback;
-            System.out.println("[MAZEWARD] AI の頭を貪欲ボットへ切り替えました");
+            announce("学習済み方策に繋がらないので " + fallback.name() + " に切り替えました");
+        }
+    }
+
+    /** 頭が切り替わったときの通知先。ゲーム側がチャットへ流す。 */
+    public void onPolicyChanged(Consumer<String> listener) {
+        this.policyListener = listener;
+        // 登録した時点の状態も 1 度伝える（試合開始直後の表示に使う）
+        listener.accept("AI: " + policy.name());
+    }
+
+    private void announce(String message) {
+        System.out.println("[MAZEWARD] " + message);
+        if (policyListener != null) {
+            policyListener.accept(message);
         }
     }
 
@@ -205,7 +224,7 @@ public final class AiDirector {
                 if (match.preparing() || !player.canSend(send.kind())) {
                     yield false;
                 }
-                match.send(player, send.kind());
+                match.send(player, send.kind(), send.count());
                 yield true;
             }
         };

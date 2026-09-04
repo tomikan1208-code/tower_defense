@@ -42,7 +42,18 @@ public sealed interface AiAction {
     record Sell(int towerIndex) implements AiAction {
     }
 
-    record Send(AttackerKind kind) implements AiAction {
+    /**
+     * 送る。{@code count} は 1 回の操作でまとめて送る体数。
+     *
+     * <p>人間はもともと連打でストックぶん撃てるので、これは
+     * <b>AI が 1 手でそれを表せるようにする</b>ためのもの。
+     * 払えない数を指定されても失敗にはせず、
+     * {@code VersusMatch#send} が払える数まで黙って切り詰める。</p>
+     */
+    record Send(AttackerKind kind, int count) implements AiAction {
+        public Send(AttackerKind kind) {
+            this(kind, 1);
+        }
     }
 
     /** 1 手ぶんの応答（席番号 + 行動）。 */
@@ -70,7 +81,9 @@ public sealed interface AiAction {
                 case "upgrade" -> new Upgrade(Integer.parseInt(parts[2]),
                         Integer.parseInt(parts[3]));
                 case "sell" -> new Sell(Integer.parseInt(parts[2]));
-                case "send" -> new Send(AttackerKind.valueOf(parts[2]));
+                // 体数は省略可（古い方策との互換のため。省略なら 1 体）
+                case "send" -> new Send(AttackerKind.valueOf(parts[2]),
+                        parts.length > 3 ? Integer.parseInt(parts[3]) : 1);
                 default -> null;
             };
             return action == null ? null : new Seated(seat, action);
@@ -91,7 +104,8 @@ public sealed interface AiAction {
             case Tower tower -> tower.kind().displayName() + " を設置";
             case Upgrade upgrade -> "強化 #" + upgrade.towerIndex();
             case Sell sell -> "売却 #" + sell.towerIndex();
-            case Send send -> send.kind().displayName() + " を送る";
+            case Send send -> send.kind().displayName()
+                    + (send.count() > 1 ? " x" + send.count() : "") + " を送る";
         };
     }
 }

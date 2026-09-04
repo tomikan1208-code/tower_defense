@@ -89,6 +89,7 @@ public final class MazewardServer {
                 case "!state" -> event.getPlayer().sendMessage(
                         Component.text(game.debugState(), NamedTextColor.AQUA));
                 case "!next" -> game.forceAdvance(event.getPlayer());
+                case "!ai" -> game.reportAiState(event.getPlayer());
                 case "!help" -> {
                     event.getPlayer().sendMessage(Component.text("── 操作 ──", NamedTextColor.GOLD));
                     event.getPlayer().sendMessage(Component.text(
@@ -100,6 +101,8 @@ public final class MazewardServer {
                             "青=現在の経路  黄=配置予定  赤=変わる区間", NamedTextColor.AQUA));
                     event.getPlayer().sendMessage(Component.text(
                             "!next : 進行が止まったときの復帰", NamedTextColor.GRAY));
+                    event.getPlayer().sendMessage(Component.text(
+                            "!ai : AI の頭・モデル名・ブリッジの状態", NamedTextColor.GRAY));
                 }
                 default -> event.getPlayer().sendMessage(
                         Component.text("!help で操作一覧", NamedTextColor.GRAY));

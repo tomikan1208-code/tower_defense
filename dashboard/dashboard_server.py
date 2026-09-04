@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -128,6 +129,19 @@ def python_exe():
     return sys.executable
 
 
+#: 学習プロセスを**別のプロセスグループ**で起動する。Windows で
+#: ``CTRL_BREAK_EVENT`` を送るための前提条件で、POSIX でも新しいセッションに
+#: しておくとダッシュボード自身の Ctrl+C を巻き込まない。
+#: ``terminate()`` は Windows では ``TerminateProcess``（捕まえられない即殺）
+#: なので、これが無いと**学習中の世代がまるごと消える**
+_NEW_GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+              if os.name == "nt" else {"start_new_session": True})
+
+#: 停止要求を出してから強制終了するまでの猶予（秒）。塊 1 つと保存が
+#: 終わればよいので、実測（1 チャンク 5-10 秒）に対して十分すぎる長さ
+STOP_GRACE_SEC = 300
+
+
 class TrainingManager:
     def __init__(self):
         self.process = None
@@ -158,7 +172,8 @@ class TrainingManager:
             self.process = subprocess.Popen(
                 cmd, cwd=_AI, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1)
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                **_NEW_GROUP)
         except OSError as e:
             return False, f"プロセス起動に失敗: {e}"
 
@@ -170,11 +185,37 @@ class TrainingManager:
         return True, "学習を開始しました"
 
     def stop(self):
+        """**即殺さず停止要求を送る。** 学習側が塊の切れ目で抜けて、
+        ``ppo_latest.pt`` を書いてから終わる（:func:`train.install_stop_handlers`）。
+        殺してしまうとその世代ぶんの学習が保存されず、世代番号も戻る。
+        """
         if not self.is_running or not self.process:
             return False, "学習は実行されていません"
-        self.process.terminate()
-        self._add_log("warn", "停止を要求しました")
-        return True, "停止しました"
+        proc = self.process
+        try:
+            if os.name == "nt":
+                # Windows の SIGTERM は配送されない。CTRL_BREAK なら受け取れる
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.terminate()          # POSIX は SIGTERM がそのまま届く
+        except (OSError, ValueError) as e:
+            self._add_log("warn", f"停止要求を送れなかったので強制終了します: {e}")
+            proc.kill()
+            return True, "強制終了しました"
+        self._add_log("warn", "停止を要求しました。"
+                              "いまの世代を保存してから終わります")
+        threading.Thread(target=self._force_kill_later,
+                         args=(proc, STOP_GRACE_SEC), daemon=True).start()
+        return True, "停止を要求しました（保存が終わり次第とまります）"
+
+    def _force_kill_later(self, proc, grace):
+        """保存まで進まずに固まったときの最後の手段。"""
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            self._add_log("error",
+                          f"{grace:.0f} 秒たっても終わらないので強制終了します")
+            proc.kill()
 
     # ── 標準出力の読み取り ──
     def _read_output(self):
@@ -205,6 +246,9 @@ class TrainingManager:
         r"\[Progress\](?: Gen (\d+) \|)? Step (\d+)/(\d+)"
         r"(?: \| Done: (\d+)/(\d+))?(?: \(([\d.]+)%\))?(?: \| Speed: ([\d.]+))?")
     _RE_GEN = re.compile(r"\[Gen (\d+)\]")
+    #: ``[Gen N]`` 行の 1 項目。``キー: 数値`` だけを拾う（文字列の項目は無視）
+    _RE_FIELD = re.compile(r"(?:\[Gen \d+\]\s*)?([A-Za-z_][A-Za-z0-9_]*)"
+                           r"\s*[:=]\s*(-?\d+(?:\.\d+)?)\s*$")
 
     def _parse(self, line):
         m = self._RE_PROGRESS.search(line)
@@ -224,10 +268,13 @@ class TrainingManager:
         m = self._RE_GEN.search(line)
         if m:
             entry = {"episode": int(m.group(1))}
-            for key in _NUM_KEYS:
-                mv = re.search(rf"{key}[:=]\s*(-?[\d.]+)", line, re.I)
+            # ``[Gen N] key: 値 | key: 値 | ...`` を**キー名を決め打ちせずに**拾う。
+            # train.py が指標を足したときに、ここを直し忘れて片方だけ出ない
+            # という事故が起きないようにする
+            for field in line.split("|"):
+                mv = self._RE_FIELD.match(field.strip())
                 if mv:
-                    entry[key] = float(mv.group(1))
+                    entry[mv.group(1)] = float(mv.group(2))
             with self._lock:
                 self.live_stats.append(entry)
                 self.live_stats = self.live_stats[-500:]
@@ -243,15 +290,25 @@ class TrainingManager:
             if not isinstance(item, dict) or "episode" not in item:
                 continue
             rec = {"episode": item["episode"], "timestamp": item.get("timestamp")}
+            # **ログにある値は全部そのまま渡す。** 以前は METRICS に載っている
+            # キーだけを拾って残りを捨てていたので、train.py 側で指標を足しても
+            # ダッシュボードには一生出てこなかった（勝者/敗者の内訳・分位・
+            # 種類別ダメージ・定点観測などが丸ごと見えなくなっていた）。
+            # グラフに出す並びは METRICS が決めるが、**保持は無条件**にする
+            for key, v in item.items():
+                if key in ("episode", "timestamp"):
+                    continue
+                if isinstance(v, bool) or isinstance(v, (int, float, str)):
+                    rec[key] = v
+                elif isinstance(v, dict):
+                    inner = {k: iv for k, iv in v.items()
+                             if isinstance(iv, (int, float))}
+                    if inner:
+                        rec[key] = inner
+            # グラフが期待するキーは、無ければ None で埋めて形を揃える
             for key in _NUM_KEYS:
-                v = item.get(key)
-                rec[key] = v if isinstance(v, (int, float)) else None
-            for key in DICT_METRICS:
-                if isinstance(item.get(key), dict):
-                    rec[key] = {k: v for k, v in item[key].items()
-                                if isinstance(v, (int, float))}
-            rec["curriculum"] = item.get("curriculum")
-            rec["balance_fingerprint"] = item.get("balance_fingerprint")
+                if not isinstance(rec.get(key), (int, float)):
+                    rec[key] = None
             records.append(rec)
         records.sort(key=lambda r: r["episode"] or 0)
         self._log_cache = {"mtime": mtime, "records": records}
@@ -788,6 +845,54 @@ def api_balance_sync():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/balance/editor")
+def api_balance_editor():
+    """全モンスター・全タワーの数値を、Java の現在値つきで返す。"""
+    try:
+        import importlib
+        import balance
+        import balance_edit
+        importlib.reload(balance)
+        importlib.reload(balance_edit)
+        data = balance_edit.snapshot()
+        data["ok"] = True
+        data["locked"] = manager.is_running
+        return jsonify(data)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        return jsonify({"ok": False, "error": f"{e}\n{traceback.format_exc()}"})
+
+
+@app.route("/api/balance/editor/apply", methods=["POST"])
+def api_balance_editor_apply():
+    """編集した数値を ``balance.py`` と Java enum の両方へ書き戻す。
+
+    **学習中は断る。** 学習プロセスは起動時に ``balance.py`` を読むので、
+    途中で書き換えても走っている世代には効かない。効いていないのに
+    「変えた」と思い込むと、そのあとの指標を全部読み違える。
+    """
+    if manager.is_running:
+        return jsonify({"ok": False,
+                        "message": "学習中は数値を変更できません。"
+                                   "停止してから保存してください"})
+    d = request.json or {}
+    changes = d.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return jsonify({"ok": False, "message": "変更がありません"})
+    try:
+        import importlib
+        import balance
+        import balance_edit
+        importlib.reload(balance)
+        importlib.reload(balance_edit)
+        ok, msg, detail = balance_edit.apply(changes)
+        return jsonify({"ok": ok, "message": msg, **detail})
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        return jsonify({"ok": False,
+                        "message": f"{e}", "trace": traceback.format_exc()})
+
+
 @app.route("/api/replay")
 def api_replay():
     return jsonify(replay_service.state())
@@ -845,6 +950,70 @@ def api_stream():
 
 
 import drive_sync
+import handoff
+
+
+# ── 学習の受け渡し（ローカル ⇄ Colab を 1 本の学習にする）──
+class HandoffService:
+    """Drive とのやり取りは数十秒かかるので裏で回す。"""
+
+    def __init__(self):
+        self.busy = False
+        self.message = ""
+        self.error = ""
+        self._lock = threading.Lock()
+
+    def run(self, action, confirm):
+        with self._lock:
+            if self.busy:
+                return False, "受け渡しを実行中です"
+            self.busy = True
+            self.message, self.error = "実行中…", ""
+
+        def work():
+            try:
+                fn = handoff.pull if action == "pull" else handoff.push
+                ok, msg = fn(confirm=confirm)
+                with self._lock:
+                    self.message = msg if ok else ""
+                    self.error = "" if ok else msg
+            except Exception as e:  # noqa: BLE001
+                with self._lock:
+                    self.error = str(e)
+                    self.message = ""
+            finally:
+                with self._lock:
+                    self.busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return True, "開始しました"
+
+    def state(self):
+        with self._lock:
+            return {"busy": self.busy, "message": self.message, "error": self.error}
+
+
+handoff_service = HandoffService()
+
+
+@app.route("/api/handoff/state")
+def api_handoff_state():
+    try:
+        st = handoff.full_state()
+    except Exception as e:  # noqa: BLE001
+        st = {"error": str(e), "local": {}, "drive": {}, "advice": ""}
+    st.update(handoff_service.state())
+    return jsonify(st)
+
+
+@app.route("/api/handoff/run", methods=["POST"])
+def api_handoff_run():
+    d = request.json or {}
+    action = d.get("action")
+    if action not in ("pull", "push"):
+        return jsonify({"ok": False, "message": "action は pull か push です"})
+    ok, msg = handoff_service.run(action, bool(d.get("confirm")))
+    return jsonify({"ok": ok, "message": msg})
 
 
 @app.route("/api/drive/state")

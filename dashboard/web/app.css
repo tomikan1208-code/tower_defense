@@ -512,3 +512,32 @@ td.num { text-align: right; }
     .brand-sub { display: none; }
     .gen-metrics { grid-template-columns: 1fr; }
 }
+
+/* ── 数値編集 ──
+   モノトーンのままなので、「変更した欄」は色ではなく
+   枠の太さと左の縦線で示す。色に頼ると印刷や弱視で消える。 */
+.bal-row + .bal-row { margin-top: 14px; }
+.bal-id { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
+.bal-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+    gap: 10px 14px;
+}
+.bal-f { display: flex; flex-direction: column; gap: 4px; }
+.bal-f > span { font-size: 11.5px; color: var(--ink2); }
+.bal-f > span em { font-style: normal; color: var(--ink4); }
+.bal-f input {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm); background: var(--white); color: var(--ink);
+    font-family: var(--mono); font-size: 13px;
+}
+.bal-f input:focus { outline: none; border-color: var(--ink); }
+.bal-f input:disabled { background: var(--fill); color: var(--ink3); }
+.bal-f.dirty input { border: 2px solid var(--ink); font-weight: 700; }
+.bal-f.diff > span::after {
+    content: " ⚠ Java とずれ"; color: var(--ink); font-weight: 700;
+}
+.bal-sub {
+    margin-top: 12px; padding-left: 12px; border-left: 2px solid var(--line-strong);
+}
+.bal-sub-title { font-size: 12px; font-weight: 700; margin-bottom: 8px; }

@@ -284,7 +284,34 @@ def download_blocking(include_checkpoints=False):
     return got
 
 
-def upload_blocking(paths, target_folder=None):
+def ensure_child_folder(service, name, parent_id):
+    """親フォルダの直下に ``name`` のフォルダを用意して id を返す。"""
+    safe = name.replace(chr(39), chr(92) + chr(39))
+    query = ("mimeType='application/vnd.google-apps.folder' and trashed=false "
+             f"and name='{safe}' and '{parent_id}' in parents")
+    found = service.files().list(q=query, spaces='drive',
+                                 fields='files(id,name)').execute().get('files', [])
+    if found:
+        return found[0]['id']
+    meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_id]}
+    return service.files().create(body=meta, fields='id').execute()['id']
+
+
+def upload_blocking(items, target_folder=None):
+    """Drive へ送る。**ディレクトリ構造を保つ。**
+
+    以前は ``os.path.basename`` だけで送っていたため、``ai/mazeward_env/env.py``
+    が ``env.py`` としてフォルダ直下に平置きされていた。その結果
+
+    - Colab 側に ``ai/`` が無く、制御サーバーの起動が
+      「No such file or directory」で失敗する
+    - ``mazeward_env`` パッケージが崩れて ``import`` できない
+
+    という 2 つが同時に起きていた。相対パスぶんのサブフォルダを作ってから置く。
+
+    :param items: パスの一覧、または ``(パス, 相対パス)`` の一覧
+    """
     from googleapiclient.http import MediaFileUpload
 
     service = _service()
@@ -294,20 +321,42 @@ def upload_blocking(paths, target_folder=None):
         meta = {'name': folder, 'mimeType': 'application/vnd.google-apps.folder'}
         folder_id = service.files().create(body=meta, fields='id').execute()['id']
 
-    existing = {f['name']: f['id'] for f in list_folder(service, folder_id)}
+    folder_cache = {'': folder_id}          # 相対ディレクトリ -> Drive の id
+    listing_cache = {}                      # Drive の id -> {名前: id}
     sent = []
-    for path in paths:
+    for item in items:
+        if isinstance(item, (tuple, list)):
+            path, rel = item[0], item[1]
+        else:
+            path, rel = item, os.path.basename(item)
         if not os.path.exists(path):
             continue
-        name = os.path.basename(path)
+
+        parts = str(rel).replace(os.sep, '/').split('/')
+        name = parts[-1]
+        sub = ''
+        parent = folder_id
+        for piece in parts[:-1]:
+            sub = f'{sub}/{piece}' if sub else piece
+            if sub not in folder_cache:
+                folder_cache[sub] = ensure_child_folder(service, piece, parent)
+            parent = folder_cache[sub]
+
+        if parent not in listing_cache:
+            listing_cache[parent] = {f['name']: f['id']
+                                     for f in list_folder(service, parent)}
+        existing = listing_cache[parent]
+
         media = MediaFileUpload(path, resumable=False)
         if name in existing:
             service.files().update(fileId=existing[name], media_body=media).execute()
         else:
-            service.files().create(body={'name': name, 'parents': [folder_id]},
-                                   media_body=media, fields='id').execute()
-        sent.append(name)
-        _set(message=f'{name} を送信しました')
+            new_id = service.files().create(
+                body={'name': name, 'parents': [parent]},
+                media_body=media, fields='id').execute()['id']
+            existing[name] = new_id
+        sent.append(rel)
+        _set(message=f'{rel} を送信しました')
     return sent
 
 
@@ -323,8 +372,9 @@ def run_async(action, **kwargs):
                 _set(files=files, message=f'{len(files)} 件を取得しました',
                      last_sync=time.strftime('%Y-%m-%d %H:%M:%S'))
             elif action == 'upload_code':
-                paths = [path for path, _ in code_files()]
-                sent = upload_blocking(paths, target_folder=DEFAULT_CODE_FOLDER)
+                # 相対パスも渡す。捨てると Drive 上で平置きになる
+                sent = upload_blocking(code_files(),
+                                       target_folder=DEFAULT_CODE_FOLDER)
                 _set(message=f'{len(sent)} 件を送信しました',
                      last_sync=time.strftime('%Y-%m-%d %H:%M:%S'))
             else:

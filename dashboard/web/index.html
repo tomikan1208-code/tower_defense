@@ -39,6 +39,7 @@
         <button data-tab="charts">グラフ</button>
         <button data-tab="replay">対局ビューア</button>
         <button data-tab="balance">バランス</button>
+        <button data-tab="editor">数値編集</button>
         <button data-tab="drive">☁️ Colab・Drive連携</button>
     </div>
 </nav>
@@ -178,6 +179,37 @@
         <div id="balanceTables"></div>
     </section>
 
+    <section class="view" id="view-editor">
+        <div class="filter-row">
+            <div class="segmented" id="balEditGroups"></div>
+            <input type="search" class="input" id="balEditSearch"
+                   placeholder="名前で絞り込み" style="max-width:180px">
+            <button class="btn btn-primary" id="balEditSave" disabled>保存</button>
+            <button class="btn btn-ghost" id="balEditReset" disabled>編集を取り消す</button>
+            <span class="filter-note" id="balEditNote">読み込み中…</span>
+        </div>
+        <div class="card" id="balEditBanner" style="display:none">
+            <div class="card-note" id="balEditBannerText"></div>
+        </div>
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">数値を変えると、どこに書かれるか</div>
+            </div>
+            <div class="field-help">
+                保存すると <code>ai/balance.py</code>（AI 学習のシミュレータ）と
+                <code>src/…/*.java</code>（実際のゲーム）の<b>両方</b>に同じ値を書きます。
+                片方だけ変えると、学習した方策が実ゲームで通用しなくなるためです。<br>
+                書いたあとに <b>balance.py の構文確認と Java との突き合わせ</b>まで通し、
+                ずれていたら<b>全ファイルを元に戻します</b>。1 つでも失敗したら 1 文字も書きません。<br>
+                <b>実ゲームに反映するにはビルドとサーバー再起動が必要です。</b>
+                学習側は次に開始したときから新しい値になります。<br>
+                <b>対象外:</b> 送還・呪詛・支援の効果量（Effect）、見た目・音・説明文、
+                形状や属性などの<b>種別</b>。数値ではないか、突き合わせで検算できないため。
+            </div>
+        </div>
+        <div id="balEditBody"></div>
+    </section>
+
     <section class="view" id="view-drive">
         <div class="card">
             <div class="card-head">
@@ -204,6 +236,42 @@
                     <div id="driveFileList" style="font-size:13px; font-family:monospace; background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; max-height:200px; overflow-y:auto;">
                         ファイルはありません
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">⇄ 学習の受け渡し（ローカル ⇄ Colab）</div>
+                <div class="card-note">同じ学習を続けるための引き継ぎ。Drive を正本にして、世代番号がそのまま繋がります</div>
+            </div>
+            <div style="padding:16px; display:flex; flex-direction:column; gap:12px;">
+                <div style="display:flex; gap:16px; flex-wrap:wrap;">
+                    <div style="flex:1; min-width:200px; padding:12px; border:1px solid var(--line); border-radius:8px;">
+                        <div style="font-size:12px; color:var(--ink3);">ローカル</div>
+                        <div style="font-size:22px; font-weight:700;" id="hoLocalGen">—</div>
+                        <div style="font-size:12px; color:var(--ink3);" id="hoLocalSub">—</div>
+                    </div>
+                    <div style="flex:1; min-width:200px; padding:12px; border:1px solid var(--line); border-radius:8px;">
+                        <div style="font-size:12px; color:var(--ink3);">Drive（Colab）</div>
+                        <div style="font-size:22px; font-weight:700;" id="hoDriveGen">—</div>
+                        <div style="font-size:12px; color:var(--ink3);" id="hoDriveSub">—</div>
+                    </div>
+                </div>
+                <div id="hoAdvice" style="font-size:13px;"></div>
+                <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                    <button class="btn btn-primary" id="hoPull">⬇ Colab の続きをローカルで</button>
+                    <button class="btn btn-primary" id="hoPush">⬆ ローカルの続きを Colab で</button>
+                    <button class="btn btn-ghost" id="hoRefresh">🔄 状態を確認</button>
+                </div>
+                <div id="hoMsg" style="font-size:13px;"></div>
+                <div class="field-help">
+                    <b>受け取った側は世代の続きから再開します。</b>
+                    <code>ppo_latest.pt</code> に世代番号が入っているので、
+                    学習を開始すればその次の世代から進みます。<br>
+                    ログは捨てずに<b>世代番号で突き合わせて統合</b>します（同じ世代なら記録が多いほうを採用）。
+                    上書き前のファイルは <code>ai/models/_backup/</code> に退避します。<br>
+                    <b>両方で同時に学習しないでください。</b>世代番号が衝突してどちらの記録か分からなくなります。
                 </div>
             </div>
         </div>
@@ -285,28 +353,37 @@
         </div>
         <div class="field-row">
             <div class="field">
-                <label class="field-label" for="gensInput">回す世代数</label>
-                <input type="number" class="input" id="gensInput" value="20" min="1">
+                <label class="field-label" for="gensInput">回す世代数（0 = 無限）</label>
+                <input type="number" class="input" id="gensInput" value="20" min="0"
+                       placeholder="0 で停止ボタンまで回り続けます">
             </div>
             <div class="field">
                 <label class="field-label" for="envsInput">同時試合数</label>
-                <input type="number" class="input" id="envsInput" placeholder="自動"
-                       min="2" step="2">
+                <input type="number" class="input" id="envsInput" value="64"
+                       placeholder="自動" min="2" step="2">
             </div>
+        </div>
+        <div class="field-help">
+            <b>世代数に 0 を入れると上限なし</b>で、停止ボタンを押すまで回り続けます。
+            停止は即殺しではなく<b>いまの塊を終えて保存してから</b>止まるので、
+            押してから実際に止まるまで数十秒かかることがあります。<br>
+            カリキュラム（盤面の広さ・人数・送れるモンスターの種類）の進み方は
+            世代数とは別で、既定では <b>40 世代で 1 周</b>します。
+            変えたいときは環境変数 <code>MAZEWARD_CURRICULUM_GENS</code>。
         </div>
         <div class="field-row">
             <div class="field">
                 <label class="field-label" for="genEarlyInput">
                     完了を待つ上限（ゲーム内・分）
                 </label>
-                <input type="number" class="input" id="genEarlyInput" value="30"
+                <input type="number" class="input" id="genEarlyInput" value="20"
                        min="1" step="5">
             </div>
             <div class="field">
                 <label class="field-label" for="genMaxInput">
                     打ち切り（ゲーム内・分）
                 </label>
-                <input type="number" class="input" id="genMaxInput" value="60"
+                <input type="number" class="input" id="genMaxInput" value="30"
                        min="2" step="5">
             </div>
         </div>
@@ -349,7 +426,7 @@
             <label class="field-label" for="randomizeInput">
                 ドメインランダム化の強さ
             </label>
-            <input type="number" class="input" id="randomizeInput" value="0.20"
+            <input type="number" class="input" id="randomizeInput" value="0"
                    min="0" max="0.5" step="0.05">
         </div>
         <div class="field-help">

@@ -219,8 +219,80 @@
         html += '<div class="card" style="background:rgba(0,0,0,0.2); padding:12px; border-radius:8px;"><div style="font-weight:bold; margin-bottom:6px; color:#ff9800;">🚀 モンスターの送り割合 (%)</div>' + fmtPctDict(rec.send_type_rates) + '</div>';
         html += '<div class="card" style="background:rgba(0,0,0,0.2); padding:12px; border-radius:8px;"><div style="font-weight:bold; margin-bottom:6px; color:#f44336;">💀 モンスターの漏れ割合 (%)</div>' + fmtPctDict(rec.leak_type_rates) + '</div>';
         html += '</div>';
+        html += allMetricsHtml(rec);
 
         $('genDetailTiles').innerHTML = html;
+    }
+
+    // ── 全指標。**ログに入っている値をすべて出す。** ────────────────
+    // 個別に並べたタイルは「まず見る 6 つ」で、それ以外は学習が進むにつれて
+    // 増える（勝者/敗者の内訳・分位・種類別ダメージ・定点観測など）。
+    // ここはキーを決め打ちせずに rec を走査するので、train.py 側で指標を
+    // 足しただけでダッシュボードにも自動で出る
+    const SKIP_KEYS = { episode: 1, timestamp: 1, live: 1 };
+
+    function looksLikeRate(key) {
+        return /_(rate|rates|mix|share|share_by_kind)$/.test(key)
+            || /^(win_vs_|match_completion|card_usage_rate|finish_rate)/.test(key);
+    }
+
+    function fmtDict(key, d) {
+        const asPct = looksLikeRate(key);
+        return Object.keys(d).sort().map(function (k, i) {
+            const color = PALETTE[i % PALETTE.length];
+            const v = d[k];
+            const val = asPct ? (v * 100).toFixed(1) + '%' : num(v, 3);
+            return '<div style="display:inline-block; margin-right:12px; margin-bottom:4px;">'
+                + '<span style="display:inline-block; width:10px; height:10px; background:'
+                + color + '; border-radius:2px; margin-right:4px;"></span>'
+                + esc(k) + ': <b>' + val + '</b></div>';
+        }).join('');
+    }
+
+    function allMetricsHtml(rec) {
+        const nums = [], dicts = [], strs = [];
+        Object.keys(rec).sort().forEach(function (k) {
+            if (SKIP_KEYS[k]) return;
+            const v = rec[k];
+            if (v === null || v === undefined) return;
+            if (typeof v === 'number') nums.push([k, v]);
+            else if (typeof v === 'string') strs.push([k, v]);
+            else if (typeof v === 'object') dicts.push([k, v]);
+        });
+        if (!nums.length && !dicts.length && !strs.length) return '';
+
+        let h = '<details open style="margin-top:16px;">'
+            + '<summary style="cursor:pointer; font-weight:bold; padding:6px 0;">'
+            + '📋 全指標（' + (nums.length + dicts.length + strs.length)
+            + ' 項目 / ログにある値をすべて表示）</summary>';
+
+        if (strs.length) {
+            h += '<div style="margin:8px 0; display:flex; flex-wrap:wrap; gap:8px;">'
+                + strs.map(function (kv) {
+                    return '<div style="background:rgba(0,0,0,0.2); padding:4px 10px;'
+                        + ' border-radius:6px;"><span style="opacity:.7;">' + esc(kv[0])
+                        + '</span> <b>' + esc(kv[1]) + '</b></div>';
+                }).join('') + '</div>';
+        }
+        if (nums.length) {
+            h += '<div style="display:grid; grid-template-columns:'
+                + ' repeat(auto-fit, minmax(240px, 1fr)); gap:2px 16px; margin:8px 0;">'
+                + nums.map(function (kv) {
+                    const asPct = looksLikeRate(kv[0]);
+                    const val = asPct ? pct(kv[1]) : num(kv[1], 4);
+                    return '<div style="display:flex; justify-content:space-between;'
+                        + ' padding:3px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">'
+                        + '<span style="opacity:.75;">' + esc(kv[0]) + '</span>'
+                        + '<b>' + val + '</b></div>';
+                }).join('') + '</div>';
+        }
+        dicts.forEach(function (kv) {
+            h += '<div class="card" style="background:rgba(0,0,0,0.2); padding:12px;'
+                + ' border-radius:8px; margin-top:8px;">'
+                + '<div style="font-weight:bold; margin-bottom:6px; opacity:.85;">'
+                + esc(kv[0]) + '</div>' + fmtDict(kv[0], kv[1]) + '</div>';
+        });
+        return h + '</details>';
     }
 
     // ── グラフタブ ──
@@ -441,7 +513,152 @@
         pollBalance();
     }
 
-    // ── 通信 ──
+    // ══════════════════════════════════════════════════
+    // 数値編集（balance.py と Java enum の両方へ書き戻す）
+    // ══════════════════════════════════════════════════
+    const balEdit = { data: null, group: 'towers', dirty: {}, q: '', loading: false };
+
+    function balEditCount() { return Object.keys(balEdit.dirty).length; }
+
+    function balEditSyncButtons() {
+        const n = balEditCount();
+        const locked = !!(balEdit.data && balEdit.data.locked);
+        $('balEditSave').disabled = locked || n === 0;
+        $('balEditReset').disabled = n === 0;
+        $('balEditSave').textContent = n ? '保存（' + n + ' 項目）' : '保存';
+    }
+
+    /** 数値欄 1 つ。**元の値を data-orig に持たせて、変更の有無を毎回そこから判定する。** */
+    function balEditField(f) {
+        const dirty = Object.prototype.hasOwnProperty.call(balEdit.dirty, f.path);
+        const value = dirty ? balEdit.dirty[f.path] : f.value;
+        const locked = !!(balEdit.data && balEdit.data.locked);
+        const cls = 'bal-f' + (dirty ? ' dirty' : '') + (f.same === false ? ' diff' : '');
+        const title = f.same === false
+            ? 'balance.py=' + f.value + ' / Java=' + f.java + '（保存すると両方この値になります）'
+            : f.path;
+        return '<label class="' + cls + '" title="' + esc(title) + '">'
+            + '<span>' + esc(f.label) + (f.unit ? ' <em>' + esc(f.unit) + '</em>' : '') + '</span>'
+            + '<input type="number" data-path="' + esc(f.path) + '"'
+            + ' data-orig="' + esc(String(f.value)) + '"'
+            + ' step="' + (f.kind === 'int' ? '1' : '0.01') + '"'
+            + (locked || !f.editable ? ' disabled' : '')
+            + ' value="' + esc(String(value)) + '"></label>';
+    }
+
+    function renderBalEditor() {
+        const d = balEdit.data;
+        if (!d) return;
+        $('balEditGroups').innerHTML = d.groups.map(function (g) {
+            return '<button data-group="' + esc(g.key) + '"'
+                + (g.key === balEdit.group ? ' class="active"' : '') + '>'
+                + esc(g.label) + '</button>';
+        }).join('');
+        $('balEditGroups').querySelectorAll('button').forEach(function (b) {
+            b.addEventListener('click', function () {
+                balEdit.group = b.dataset.group;
+                renderBalEditor();
+            });
+        });
+
+        const group = d.groups.filter((g) => g.key === balEdit.group)[0];
+        const q = balEdit.q.trim().toLowerCase();
+        const rows = (group ? group.rows : []).filter(function (r) {
+            return !q || (r.id + ' ' + r.label).toLowerCase().indexOf(q) >= 0;
+        });
+        if (!rows.length) {
+            $('balEditBody').innerHTML = '<div class="card"><div class="empty">'
+                + '該当する項目がありません</div></div>';
+            balEditSyncButtons();
+            return;
+        }
+        $('balEditBody').innerHTML = rows.map(function (r) {
+            let html = '<div class="card bal-row"><div class="card-head">'
+                + '<div class="card-title">' + esc(r.label)
+                + ' <span class="bal-id">' + esc(r.id) + '</span></div>'
+                + '<div class="card-note">' + esc(r.note || '') + '</div></div>'
+                + '<div class="bal-grid">' + r.fields.map(balEditField).join('') + '</div>';
+            (r.subs || []).forEach(function (sub) {
+                html += '<div class="bal-sub"><div class="bal-sub-title">'
+                    + esc(sub.label) + '</div><div class="bal-grid">'
+                    + sub.fields.map(balEditField).join('') + '</div></div>';
+            });
+            return html + '</div>';
+        }).join('');
+
+        $('balEditBody').querySelectorAll('input[data-path]').forEach(function (input) {
+            input.addEventListener('input', function () {
+                const path = input.dataset.path;
+                const orig = parseFloat(input.dataset.orig);
+                const now = parseFloat(input.value);
+                // 空欄や数字でない入力は「まだ書きかけ」。消すのではなく無視する
+                if (!Number.isFinite(now)) { delete balEdit.dirty[path]; }
+                else if (Math.abs(now - orig) < 1e-9) { delete balEdit.dirty[path]; }
+                else { balEdit.dirty[path] = now; }
+                input.parentElement.classList.toggle(
+                    'dirty', Object.prototype.hasOwnProperty.call(balEdit.dirty, path));
+                balEditSyncButtons();
+            });
+        });
+        balEditSyncButtons();
+    }
+
+    async function loadBalEditor(force) {
+        if (balEdit.loading) return;
+        if (balEdit.data && !force) { renderBalEditor(); return; }
+        balEdit.loading = true;
+        $('balEditNote').textContent = '読み込み中…';
+        try {
+            const d = await getJSON('/api/balance/editor');
+            if (!d.ok) {
+                $('balEditNote').textContent = 'エラー: ' + String(d.error || '').split('\n')[0];
+                return;
+            }
+            balEdit.data = d;
+            let n = 0;
+            d.groups.forEach((g) => g.rows.forEach(function (r) {
+                n += r.fields.length;
+                (r.subs || []).forEach((s) => { n += s.fields.length; });
+            }));
+            $('balEditNote').textContent = n + ' 項目';
+            const banner = [];
+            if (d.locked) {
+                banner.push('<b>学習中なので保存できません。</b>学習を停止してから変更してください'
+                    + '（走っている学習は起動時の値で動いているため、途中で書き換えても効きません）');
+            }
+            if (d.unwritable_total) {
+                banner.push('Java 側の書き込み先が見つからない項目が '
+                    + d.unwritable_total + ' 件あります: ' + esc(d.unwritable.join(', ')));
+            }
+            $('balEditBanner').style.display = banner.length ? '' : 'none';
+            $('balEditBannerText').innerHTML = banner.join('<br>');
+            renderBalEditor();
+        } finally {
+            balEdit.loading = false;
+        }
+    }
+
+    async function saveBalEditor() {
+        const changes = Object.keys(balEdit.dirty)
+            .map((path) => ({ path: path, value: balEdit.dirty[path] }));
+        if (!changes.length) return;
+        if (!confirm(changes.length + ' 項目を balance.py と Java の両方に書き込みます。\n'
+            + '実ゲームに反映するにはビルドとサーバー再起動が必要です。\nよろしいですか？')) return;
+        $('balEditSave').disabled = true;
+        $('balEditNote').textContent = '保存中…';
+        const res = await post('/api/balance/editor/apply', { changes: changes });
+        if (!res.ok) {
+            alert(res.message || '保存に失敗しました');
+            $('balEditNote').textContent = '保存に失敗しました';
+            balEditSyncButtons();
+            return;
+        }
+        balEdit.dirty = {};
+        await loadBalEditor(true);
+        $('balEditNote').textContent = res.message;
+    }
+
+    // ── 通信 ──
     async function loadHistory() {
         const data = await getJSON('/api/history');
         state.history = data.records || [];
@@ -517,6 +734,7 @@
                 if (btn.dataset.tab === 'charts') { renderCharts(); renderDictCharts(); }
                 if (btn.dataset.tab === 'replay') pollReplay();
                 if (btn.dataset.tab === 'balance') pollBalance();
+            if (btn.dataset.tab === 'editor') loadBalEditor(false);
             });
         });
 
@@ -542,6 +760,15 @@
         });
 
         // ── バランス ──
+        $('balEditSave').addEventListener('click', saveBalEditor);
+        $('balEditReset').addEventListener('click', function () {
+            balEdit.dirty = {};
+            renderBalEditor();
+        });
+        $('balEditSearch').addEventListener('input', function () {
+            balEdit.q = this.value;
+            renderBalEditor();
+        });
         $('balanceRun').addEventListener('click', () => runBalance(true));
         $('balanceRunFast').addEventListener('click', () => runBalance(false));
         $('balanceSync').addEventListener('click', async function () {
@@ -575,13 +802,15 @@
             state.startPending = true;
             $('startBtn').disabled = true;
             try {
+                // 0 は「無限」なので || で 20 に落としてはいけない
+                const gens = parseInt($('gensInput').value, 10);
                 const res = await post('/api/start', {
                     mode: $('modeSelect').value,
-                    gens: parseInt($('gensInput').value, 10) || 20,
+                    gens: (Number.isFinite(gens) && gens >= 0) ? gens : 20,
                     num_envs: parseInt($('envsInput').value, 10) || 0,
                     randomize: parseFloat($('randomizeInput').value) || 0,
-                    gen_early: parseFloat($('genEarlyInput').value) || 30,
-                    gen_max: parseFloat($('genMaxInput').value) || 60,
+                    gen_early: parseFloat($('genEarlyInput').value) || 20,
+                    gen_max: parseFloat($('genMaxInput').value) || 30,
                     finish_early: parseFloat($('finishEarlyInput').value) || 1.0,
                     finish_late: parseFloat($('finishLateInput').value) || 0.9,
                     match_max: parseFloat($('matchMaxInput').value) || 0,
@@ -692,6 +921,54 @@
         setInterval(updateDriveUI, 3000);
         updateDriveUI();
 
+        // ── 学習の受け渡し ──
+        async function loadHandoff() {
+            const st = await getJSON('/api/handoff/state');
+            const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+            const L = st.local || {}, D = st.drive || {};
+            set('hoLocalGen', (L.generation || 0) + ' 世代');
+            set('hoLocalSub', (L.records || 0) + ' 件の記録 / '
+                + (L.checkpoint ? 'モデルあり' : 'モデルなし')
+                + (L.updated ? ' / ' + L.updated : ''));
+            set('hoDriveGen', D.available ? (D.generation || 0) + ' 世代' : '—');
+            set('hoDriveSub', D.available
+                ? (D.records || 0) + ' 件の記録 / '
+                  + (D.checkpoint ? 'モデルあり' : 'モデルなし')
+                  + (D.updated ? ' / ' + D.updated : '')
+                : (st.error || 'Drive に未接続'));
+            const adv = $('hoAdvice');
+            if (adv) adv.textContent = st.advice || '';
+            const msg = $('hoMsg');
+            if (msg) {
+                msg.textContent = st.busy ? '受け渡し中…' : (st.error || st.message || '');
+                msg.style.color = st.error ? '#f44336' : '#4caf50';
+            }
+            ['hoPull', 'hoPush'].forEach((id) => { if ($(id)) $(id).disabled = !!st.busy; });
+            if (st.busy) setTimeout(loadHandoff, 1500);
+        }
+        async function runHandoff(action, label) {
+            let res = await post('/api/handoff/run', { action: action });
+            if (res.ok === false) { alert(res.message); return; }
+            // 実行結果は state から拾う（相手のほうが進んでいると確認を求められる）
+            setTimeout(async function check() {
+                const st = await getJSON('/api/handoff/state');
+                if (st.busy) { setTimeout(check, 1000); return; }
+                if (st.error && st.error.indexOf('進んでいます') >= 0) {
+                    if (confirm(st.error + ' 本当に上書きしますか？')) {
+
+                        await post('/api/handoff/run', { action: action, confirm: true });
+                    }
+                }
+                await loadHandoff();
+                await loadHistory();
+            }, 800);
+        }
+        if ($('hoPull')) {
+            $('hoPull').addEventListener('click', () => runHandoff('pull'));
+            $('hoPush').addEventListener('click', () => runHandoff('push'));
+            $('hoRefresh').addEventListener('click', loadHandoff);
+        }
+
         // ── Colab リモート制御（ngrok） ──
         async function loadColabState() {
             const st = await getJSON('/api/colab/state');
@@ -721,6 +998,7 @@
             });
             if (!res.ok) alert(res.message || '保存に失敗しました');
             await loadColabState();
+        loadHandoff().catch(() => {});
         });
         // 切替はチェックボックスを触った瞬間に反映する。
         // 以前は「接続設定を保存」を押すまで反映されず、

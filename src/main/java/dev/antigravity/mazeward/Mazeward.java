@@ -163,6 +163,23 @@ public final class Mazeward implements Stage.Listener {
     /** AI が操作している席をまとめて動かす人。AI 不在の試合では null。 */
     private AiDirector aiDirector;
 
+    /**
+     * ブリッジの起動を待っている試合。
+     *
+     * <p>Python + torch の読み込みに数秒かかる。待たずに始めると
+     * <b>最初の数十秒だけ貪欲ボットが打つ</b> ことになり、
+     * 「学習した AI と対戦したはずなのに弱い」という誤解になる。
+     * 準備ができてから始めるほうが、待たされるより納得できる。</p>
+     */
+    private record PendingAiMatch(List<UUID> humans, List<UUID> watchers,
+                                  int aiCount, int since) {
+    }
+
+    private PendingAiMatch pendingAi;
+
+    /** ブリッジの起動を待つ上限。これを過ぎたら貪欲ボットで始める。 */
+    private static final int AI_WAIT_TIMEOUT_TICKS = 20 * 45;
+
     private Roadmap.Node activeNode;
     private Stage stage;
     private InstanceContainer stageInstance;
@@ -502,42 +519,141 @@ public final class Mazeward implements Stage.Listener {
     }
 
     /**
-     * AI と対戦する人数を選ぶ。
+     * AI と対戦する。まずモデルを選び、次に人数を選ぶ。
      *
      * <p>相手はミラーボット（自分の真似）ではなく、
      * {@code ai/} で学習した方策そのもの。学習が進むほど強くなる。</p>
      */
     private void openAiMatchMenu(PlayerSession session) {
-        List<Menus.Option> options = new ArrayList<>();
-        for (int count : new int[] {2, 3, 4, 6, 8}) {
-            int players = count;
-            options.add(new Menus.Option(
-                    Hud.item(Material.DIAMOND_SWORD,
-                            Component.text(players + " 人で対戦", NamedTextColor.RED),
-                            Component.text("あなた + AI " + (players - 1) + " 体",
-                                    NamedTextColor.GRAY),
-                            Component.text("相手は ai/ で学習した方策です",
-                                    NamedTextColor.DARK_GRAY)),
-                    () -> startAiMatch(List.of(session.player()), List.of(), players - 1)));
-        }
-        Menus.openChoice(session, Component.text("AI と対戦する人数"), options, false);
+        openModelMenu(session, false);
     }
 
     /** AI 同士の試合を観る。参加はしない。 */
     private void openSpectateMenu(PlayerSession session) {
+        openModelMenu(session, true);
+    }
+
+    /**
+     * 使うモデルを選ぶ。
+     *
+     * <p><b>どの重みで遊んでいるのかを、遊ぶ前に決められるようにする。</b>
+     * 学習中は {@code ppo_latest.pt} が数分おきに置き換わるので、
+     * 「さっきより弱い / 強い」が起きたときに、世代のせいなのか
+     * 引きのせいなのかを切り分けられないと調整の役に立たない。</p>
+     *
+     * <p>候補が 1 つ（＝ふつうに学習しているだけ）なら、この画面は出さずに飛ばす。
+     * 選択肢が 1 つしかない画面を挟むのは、ただの 1 手間でしかない。</p>
+     */
+    private void openModelMenu(PlayerSession session, boolean spectate) {
+        if (pendingAi != null) {
+            // 押し直しで待ち行列が二重になると、試合が 2 回始まってしまう
+            session.player().sendActionBar(Component.text(
+                    "AI を起動中です。そのままお待ちください", NamedTextColor.YELLOW));
+            return;
+        }
+        ensureBrain();
+        List<String> models = availableModels();
+        if (models.size() <= 1) {
+            openAiCountMenu(session, spectate, null);
+            return;
+        }
         List<Menus.Option> options = new ArrayList<>();
-        for (int count : new int[] {2, 4, 6, 8}) {
+        for (String model : models) {
+            boolean latest = model.equals("ppo_latest.pt");
+            options.add(new Menus.Option(
+                    Hud.item(latest ? Material.NETHER_STAR : Material.PAPER,
+                            Component.text(model, latest ? NamedTextColor.GOLD
+                                    : NamedTextColor.AQUA),
+                            Component.text(latest
+                                    ? "学習中の最新。世代が進むと中身が変わる"
+                                    : "その時点で保存された重み", NamedTextColor.GRAY),
+                            Component.text(modelAge(model), NamedTextColor.DARK_GRAY)),
+                    () -> openAiCountMenu(session, spectate, model)));
+        }
+        Menus.openChoice(session, Component.text("使うモデルを選ぶ"), options, false);
+    }
+
+    /** 人数を選んで開始する。 */
+    private void openAiCountMenu(PlayerSession session, boolean spectate, String model) {
+        List<Menus.Option> options = new ArrayList<>();
+        for (int count : spectate ? new int[] {2, 4, 6, 8} : new int[] {2, 3, 4, 6, 8}) {
             int players = count;
             options.add(new Menus.Option(
-                    Hud.item(Material.SPYGLASS,
-                            Component.text("AI " + players + " 体の対戦を観る",
-                                    NamedTextColor.LIGHT_PURPLE),
-                            Component.text("速度は一時停止〜16 倍まで変えられます",
+                    Hud.item(spectate ? Material.SPYGLASS : Material.DIAMOND_SWORD,
+                            Component.text(spectate ? "AI " + players + " 体の対戦を観る"
+                                            : players + " 人で対戦",
+                                    spectate ? NamedTextColor.LIGHT_PURPLE : NamedTextColor.RED),
+                            Component.text(spectate
+                                    ? "速度は一時停止〜16 倍まで変えられます"
+                                    : "あなた + AI " + (players - 1) + " 体",
                                     NamedTextColor.GRAY),
-                            Component.text("盤面には触れません", NamedTextColor.DARK_GRAY)),
-                    () -> startAiMatch(List.of(), List.of(session.player()), players)));
+                            Component.text(model == null ? "モデル: 既定" : "モデル: " + model,
+                                    NamedTextColor.DARK_GRAY)),
+                    () -> {
+                        if (model != null) {
+                            brain.selectModel(model);
+                        }
+                        if (spectate) {
+                            startAiMatch(List.of(), List.of(session.player()), players);
+                        } else {
+                            startAiMatch(List.of(session.player()), List.of(), players - 1);
+                        }
+                    }));
         }
-        Menus.openChoice(session, Component.text("AI 同士の対戦を観戦"), options, false);
+        Menus.openChoice(session, Component.text(spectate ? "AI 同士の対戦を観戦"
+                : "AI と対戦する人数"), options, false);
+    }
+
+    private void ensureBrain() {
+        if (brain == null) {
+            brain = BrainClient.openDefault();
+        }
+        brain.ensureBrainProcess();
+    }
+
+    /**
+     * 選べるモデルの一覧。
+     *
+     * <p>ブリッジが答えられるならそれを使う（別のマシンで動かしていることがある）。
+     * まだ起動途中ならローカルの {@code ai/models/} を直接見る。
+     * <b>起動を待たないと選べない</b> のでは、押してから 5 秒固まることになる。</p>
+     */
+    private List<String> availableModels() {
+        List<String> fromBrain = brain == null ? List.of() : brain.models();
+        if (!fromBrain.isEmpty()) {
+            return fromBrain.size() > 6 ? fromBrain.subList(0, 6) : fromBrain;
+        }
+        java.io.File dir = new java.io.File("ai/models");
+        java.io.File[] files = dir.listFiles((d, name) -> name.endsWith(".pt"));
+        if (files == null) {
+            return List.of();
+        }
+        java.util.Arrays.sort(files,
+                java.util.Comparator.comparingLong(java.io.File::lastModified).reversed());
+        List<String> names = new ArrayList<>();
+        for (java.io.File file : files) {
+            names.add(file.getName());
+            if (names.size() >= 6) {
+                break;
+            }
+        }
+        return names;
+    }
+
+    /** そのモデルがいつ保存されたか。「どれが新しいのか」が分からないと選べない。 */
+    private String modelAge(String name) {
+        java.io.File file = new java.io.File("ai/models/" + name);
+        if (!file.isFile()) {
+            return "";
+        }
+        long minutes = (System.currentTimeMillis() - file.lastModified()) / 60000L;
+        if (minutes < 60) {
+            return minutes + " 分前に保存";
+        }
+        if (minutes < 60 * 24) {
+            return (minutes / 60) + " 時間前に保存";
+        }
+        return (minutes / 60 / 24) + " 日前に保存";
     }
 
     /**
@@ -548,22 +664,120 @@ public final class Mazeward implements Stage.Listener {
      * @param aiCount  AI が持つ島の数
      */
     private void startAiMatch(List<Player> humans, List<Player> watchers, int aiCount) {
-        if (brain == null) {
-            brain = BrainClient.openDefault();
-        }
         // 立っていなければ自分で立てる。「Python を先に起動する」を
         // 遊ぶ前提にすると、忘れたときに理由の分からない弱い相手が出てくる
-        boolean starting = brain.ensureBrainProcess();
-        startVersus(humans, 0, aiCount, watchers);
+        ensureBrain();
+        if (brain.available()) {
+            startVersus(humans, 0, aiCount, watchers);
+            return;
+        }
 
-        if (starting || !brain.available()) {
-            // 読み込みに数秒かかる。黙って待たせると「AI が弱い」と誤解される
-            List<Player> everyone = new ArrayList<>(humans);
-            everyone.addAll(watchers);
-            for (Player player : everyone) {
+        // 起動を待つ。待つと決めた以上、待っていることを必ず画面に出す
+        pendingAi = new PendingAiMatch(ids(humans), ids(watchers), aiCount, tick);
+        for (Player player : concat(humans, watchers)) {
+            player.sendMessage(Component.text("AI を起動しています。しばらくお待ちください",
+                    NamedTextColor.AQUA));
+            player.sendMessage(Component.text(
+                    "（Python と学習済みモデルの読み込みに 5〜15 秒かかります）",
+                    NamedTextColor.GRAY));
+            String model = brain.selectedModel();
+            if (model != null) {
+                player.sendMessage(Component.text("モデル: " + model, NamedTextColor.DARK_AQUA));
+            }
+        }
+    }
+
+    private static List<UUID> ids(List<Player> players) {
+        List<UUID> out = new ArrayList<>();
+        for (Player player : players) {
+            out.add(player.getUuid());
+        }
+        return out;
+    }
+
+    private static List<Player> concat(List<Player> a, List<Player> b) {
+        List<Player> out = new ArrayList<>(a);
+        out.addAll(b);
+        return out;
+    }
+
+    /** UUID から、いま繋がっている人だけを引く。待っている間に抜けることがある。 */
+    private List<Player> online(List<UUID> ids) {
+        List<Player> out = new ArrayList<>();
+        for (UUID id : ids) {
+            PlayerSession session = sessions.get(id);
+            if (session != null) {
+                out.add(session.player());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * ブリッジの起動待ち。準備ができ次第、試合を始める。
+     *
+     * <p>待っている間は毎秒アクションバーに経過を出す。
+     * <b>何も出さずに固まるのが一番悪い</b>ので、
+     * 待つ理由と残り時間が常に見えるようにする。</p>
+     */
+    private void tickPendingAi() {
+        PendingAiMatch waiting = pendingAi;
+        List<Player> humans = online(waiting.humans());
+        List<Player> watchers = online(waiting.watchers());
+        if (humans.isEmpty() && watchers.isEmpty()) {
+            pendingAi = null;      // 全員抜けた。始める相手が居ない
+            return;
+        }
+
+        int waited = tick - waiting.since();
+        if (brain != null && brain.available()) {
+            pendingAi = null;
+            for (Player player : concat(humans, watchers)) {
                 player.sendMessage(Component.text(
-                        "AI ブリッジを起動しています。数秒後に学習済み方策へ切り替わります"
-                                + "（それまでは貪欲ボットが打ちます）", NamedTextColor.GRAY));
+                        "AI の準備ができました（" + brain.name() + "）", NamedTextColor.GREEN));
+            }
+            startVersus(humans, 0, waiting.aiCount(), watchers);
+            return;
+        }
+
+        if (waited >= AI_WAIT_TIMEOUT_TICKS) {
+            pendingAi = null;
+            for (Player player : concat(humans, watchers)) {
+                player.sendMessage(Component.text(
+                        "AI を起動できませんでした。貪欲ボットで始めます", NamedTextColor.RED));
+                for (String line : brain.status()) {
+                    player.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
+                }
+                player.sendMessage(Component.text(
+                        "手で起動するなら start-ai.bat / くわしくは !ai", NamedTextColor.DARK_GRAY));
+            }
+            startVersus(humans, 0, waiting.aiCount(), watchers);
+            return;
+        }
+
+        if (waited % 20 == 0) {
+            int left = (AI_WAIT_TIMEOUT_TICKS - waited) / 20;
+            for (Player player : concat(humans, watchers)) {
+                player.sendActionBar(Component.text(
+                        "AI を起動中… " + (waited / 20) + " 秒経過（あと " + left + " 秒待ちます）",
+                        NamedTextColor.AQUA));
+            }
+        }
+    }
+
+    /**
+     * 試合に関わっている全員（参加者と観戦者）へ流す。
+     *
+     * <p>{@code VersusMatch#announce} は参加者にしか届かない。
+     * 観戦しかしていない人にこそ「いま何が動いているか」を出したい。</p>
+     */
+    private void announceToMatch(Component message) {
+        java.util.Set<UUID> seen = new LinkedHashSet<>(versusHumans.keySet());
+        seen.addAll(spectators);
+        for (UUID id : seen) {
+            PlayerSession session = sessions.get(id);
+            if (session != null) {
+                session.player().sendMessage(message);
             }
         }
     }
@@ -644,6 +858,12 @@ public final class Mazeward implements Stage.Listener {
 
         for (Player watcher : watchers) {
             enterAsSpectator(watcher);
+        }
+        if (aiDirector != null) {
+            // 観戦者が入ってから繋ぐ。頭が入れ替わったら必ず全員に出す
+            // （黙って替わると「AI が急に弱くなった」としか見えない）
+            aiDirector.onPolicyChanged(message -> announceToMatch(
+                    Component.text(message, NamedTextColor.DARK_AQUA)));
         }
 
         for (Player human : humans) {
@@ -935,7 +1155,8 @@ public final class Mazeward implements Stage.Listener {
             session.syncSelectionWithHotbar();
             session.tick(tick);
             if (tick % 10 == 0) {
-                VersusHud.updateSidebar(session, self, versus);
+                VersusHud.updateSidebar(session, self, versus,
+                        aiDirector == null ? null : "相手: " + aiDirector.policyName());
             }
             if (tick % 40 == 0) {
                 VersusHud.applyHotbar(session, self, versus);
@@ -1014,6 +1235,9 @@ public final class Mazeward implements Stage.Listener {
     private void tickInternal() {
         tick++;
 
+        if (pendingAi != null) {
+            tickPendingAi();
+        }
         if (versus != null) {
             tickVersus();
             return;
@@ -1999,6 +2223,41 @@ public final class Mazeward implements Stage.Listener {
     }
 
     /** チャットコマンド用（デバッグ）。 */
+    /**
+     * AI の状態を洗いざらい出す（チャットの {@code !ai}）。
+     *
+     * <p>「AI が弱い」と感じたときに知りたいのは <b>方策が本当に動いているのか</b>。
+     * サイドバーの 1 行だけだと、繋がっていないのか・繋がっていて弱いのかが
+     * 区別できない。接続先・モデル名・プロセスの生死・直近のエラーまで出す。</p>
+     */
+    public void reportAiState(Player player) {
+        player.sendMessage(Component.text("── AI の状態 ──", NamedTextColor.GOLD,
+                TextDecoration.BOLD));
+        if (pendingAi != null) {
+            player.sendMessage(Component.text("AI の起動を待っています（"
+                    + (tick - pendingAi.since()) / 20 + " 秒経過）", NamedTextColor.YELLOW));
+        }
+        if (aiDirector != null) {
+            player.sendMessage(Component.text("いま打っている頭: " + aiDirector.policyName(),
+                    NamedTextColor.AQUA));
+        } else if (pendingAi == null) {
+            player.sendMessage(Component.text("この試合に AI は居ません", NamedTextColor.GRAY));
+        }
+        if (brain == null) {
+            player.sendMessage(Component.text(
+                    "ブリッジは未起動（AI と対戦 / AI 観戦 を選ぶと起動します）",
+                    NamedTextColor.GRAY));
+            return;
+        }
+        for (String line : brain.status()) {
+            player.sendMessage(Component.text(line, NamedTextColor.GRAY));
+        }
+        if (!brain.available()) {
+            player.sendMessage(Component.text(
+                    "手で起動するなら: cd ai && python mc_brain.py", NamedTextColor.DARK_GRAY));
+        }
+    }
+
     public String debugState() {
         if (run == null) {
             return "ラン未開始";

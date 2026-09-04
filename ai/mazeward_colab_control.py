@@ -92,6 +92,11 @@ def _mtime(path):
     except OSError:
         return 0.0
 
+#: 停止要求を出してから強制終了するまでの猶予（秒）。塊 1 つと保存が
+#: 終わればよいので、実測に対して十分すぎる長さ
+STOP_GRACE_SEC = 300
+
+
 class ColabTrainingManager:
     def __init__(self):
         self.process = None
@@ -134,11 +139,28 @@ class ColabTrainingManager:
         return True, "学習を開始しました"
 
     def stop(self):
+        """**即殺さず停止要求を送る。** Colab は POSIX なので ``SIGTERM`` が
+        そのまま学習側のハンドラに届き、塊の切れ目で抜けて
+        ``ppo_latest.pt`` を書いてから終わる。猶予を過ぎたら強制終了。
+        """
         if not self.is_running or not self.process:
             return False, "学習は実行されていません"
-        self.process.terminate()
-        self._add_log("warn", "停止を要求しました")
-        return True, "停止しました"
+        proc = self.process
+        proc.terminate()
+        self._add_log("warn", "停止を要求しました。"
+                              "いまの世代を保存してから終わります")
+        threading.Thread(target=self._force_kill_later,
+                         args=(proc, STOP_GRACE_SEC), daemon=True).start()
+        return True, "停止を要求しました（保存が終わり次第とまります）"
+
+    def _force_kill_later(self, proc, grace):
+        """保存まで進まずに固まったときの最後の手段。"""
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            self._add_log("error",
+                          f"{grace:.0f} 秒たっても終わらないので強制終了します")
+            proc.kill()
 
     # ── 標準出力の読み取り ──
     def _read_output(self):
