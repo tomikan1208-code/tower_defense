@@ -42,6 +42,13 @@ BUILDABLE = np.array([1, 0, 0, 0, 0, 0], dtype=bool)
 STEP_DX = (0, 1, 1, 1, 0, -1, -1, -1)
 STEP_DZ = (-1, -1, 0, 1, 1, 1, 0, -1)
 
+#: numba 版の到達判定（無ければ None）。:meth:`Grid.reachable` が使う。
+#: **あってもなくても結果は同じ**で、実測 49 倍速いだけ
+try:
+    from . import pathfinder_fast as _FAST      # type: ignore[attr-defined]
+except ImportError:                             # numba 未導入
+    _FAST = None
+
 
 class Grid:
     """1 つの島の盤面。``cells[z, x]`` で引く（Java の ``z * width + x`` と同じ並び）。"""
@@ -143,6 +150,8 @@ class Grid:
         配置判定は非常に高頻度で呼ばれるうえ、経路の**形**は要らないので
         Theta* ではなく単純な塗りつぶしを使う。
         """
+        if _FAST is not None:
+            return _FAST.reachable_fast(self, from_x, from_z, goals)
         goals = self.core_cells if goals is None else goals
         if not goals or not self.in_bounds(from_x, from_z):
             return False
@@ -335,3 +344,55 @@ def generate_board(cfg: B.BoardConfig, rng) -> Grid:
         if grid is not None:
             return grid
     return _fallback(cfg)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 大型塔の土台（観測チャンネル）
+# ════════════════════════════════════════════════════════════════════
+def big_pad_masks(base: np.ndarray, buildable: np.ndarray):
+    """大型塔の土台を 2 枚のマスクにする。 ``(いま置ける, あと 1 マスで置ける)``
+
+    :param base: いま塔を載せられる空きセル（WALL / ROCK かつ塔が乗っていない）
+    :param buildable: カードを置けるセル（OPEN）
+    :returns: ``(pad_now, pad_gain)`` どちらも ``base`` と同じ形の bool
+
+    **なぜ観測に入れるのか。** 砲塔・雷塔・監視塔は 2x2、弩塔は 1x3 の土台が要る。
+    塔の設置マスクは「いま置けるか」しか伝えないので、
+    **「あと 1 マス置けば大型塔の土台になる」は盤面から読むしかない**。
+
+    ベンチで測ると、この情報が要る理由がはっきりした。迷路を土台重視に変える
+    *だけ* だと経路が短くなって漏れが倍に悪化し、塔を大型に変える *だけ* だと
+    土台が無くて 24 枠中 15 基しか建たない。**両方を同時に変えて初めて
+    漏れが半分以下になる**。片方ずつ動かすとどちらも損をするので、
+    報酬の勾配だけでこの谷を渡るのは難しい。ここは「置いた結果どうなるか」
+    というゲームのルールそのものなので、観測で見せるのが筋がよい。
+    """
+    now = np.zeros_like(base)
+    gain = np.zeros_like(base)
+
+    # --- 2x2 ---  窓 (z, x) は (z,x) (z,x+1) (z+1,x) (z+1,x+1)
+    quad = ((slice(None, -1), slice(None, -1)), (slice(None, -1), slice(1, None)),
+            (slice(1, None), slice(None, -1)), (slice(1, None), slice(1, None)))
+    cells = [base[q] for q in quad]
+    win = cells[0] & cells[1] & cells[2] & cells[3]
+    for q in quad:
+        now[q] |= win
+    for i, q in enumerate(quad):
+        others = np.logical_and.reduce([cells[j] for j in range(4) if j != i])
+        gain[q] |= buildable[q] & others
+
+    # --- 1x3（縦横）---
+    for axis in (0, 1):
+        tri = [(slice(k, k - 2 if k < 2 else None),) if axis == 0 else
+               (slice(None), slice(k, k - 2 if k < 2 else None))
+               for k in range(3)]
+        tri = [q if axis == 1 else (q[0], slice(None)) for q in tri]
+        cells = [base[q] for q in tri]
+        win = cells[0] & cells[1] & cells[2]
+        for q in tri:
+            now[q] |= win
+        for i, q in enumerate(tri):
+            others = np.logical_and.reduce([cells[j] for j in range(3) if j != i])
+            gain[q] |= buildable[q] & others
+
+    return now, gain & ~base

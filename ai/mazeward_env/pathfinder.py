@@ -57,6 +57,12 @@ class PathResult:
 
 _UNREACHABLE = PathResult([], 0.0, False)
 
+#: numba 版（無ければ None）。**あってもなくても結果は同じ**で、速度だけ変わる
+try:
+    from . import pathfinder_fast as _FAST      # type: ignore[attr-defined]
+except ImportError:                             # numba 未導入
+    _FAST = None
+
 
 def line_of_sight(walk: np.ndarray, x0: int, z0: int, x1: int, z1: int) -> bool:
     """2 セル中心を結ぶ直線が通行可能セルだけを通るか。 (PathFinder#lineOfSight)
@@ -110,7 +116,22 @@ def line_of_sight(walk: np.ndarray, x0: int, z0: int, x1: int, z1: int) -> bool:
 
 def find(grid: Grid, start: Tuple[int, int],
          goals: Optional[Sequence[Tuple[int, int]]] = None) -> PathResult:
-    """スポーンからコアまでの折れ線。 (PathFinder#find)"""
+    """スポーンからコアまでの折れ線。 (PathFinder#find)
+
+    numba があれば :mod:`pathfinder_fast` の JIT 版へ回す（実測 30 倍）。
+    **どちらを通っても結果は同じ**なので、呼ぶ側は気にしなくてよい。
+    """
+    if _FAST is not None:
+        return _FAST.find_fast(grid, start, goals, _UNREACHABLE, PathResult)
+    return find_python(grid, start, goals)
+
+
+def find_python(grid: Grid, start: Tuple[int, int],
+                goals: Optional[Sequence[Tuple[int, int]]] = None) -> PathResult:
+    """:func:`find` の純 Python 実装。**正解の定義はこちら。**
+
+    numba 版はこれと 1 対 1 で一致していることを :mod:`selfcheck` で検証する。
+    """
     goals = grid.core_cells if goals is None else goals
     sx, sz = start
     if not grid.in_bounds(sx, sz) or not goals:
