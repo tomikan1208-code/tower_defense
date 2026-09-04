@@ -173,20 +173,22 @@ def analyse_economy(bal: B.Balance, rep: Report) -> None:
         rep.add("warn", "経済",
                 f"強化 1 段の待ち時間の中央値が {median:.0f} 秒（目安 {UPGRADE_WAIT_LIMIT:.0f} 秒）。"
                 "強化が重すぎて、コインが送りに偏ります",
-                {"path": "balance.UPGRADE_COST_STEP",
-                 "current": B.UPGRADE_COST_STEP,
-                 "suggested": round(B.UPGRADE_COST_STEP * UPGRADE_WAIT_LIMIT / median, 3)})
+                {"path": "balance.UPGRADE_COST_GROWTH",
+                 "current": B.UPGRADE_COST_GROWTH,
+                 "suggested": round(B.UPGRADE_COST_GROWTH * UPGRADE_WAIT_LIMIT / median, 3)})
     else:
         rep.add("info", "経済",
                 f"強化 1 段の待ち時間の中央値は {median:.0f} 秒（目安 {UPGRADE_WAIT_LIMIT:.0f} 秒以内）")
 
-    # 撃破報酬の回収率
+    # 撃破報酬の回収率。**総量は人数によらず一定**なので、
+    # 代表として 4 人戦（相手 3 人）の 1 体あたりで並べる
     rows = []
     for key in B.ATTACKER_ORDER:
         a = bal.attackers[key]
-        reward = bal.kill_reward(key)
+        reward = bal.kill_reward(key, 3)
         rows.append({"attacker": a.name_jp, "cost": a.cost, "reward": reward,
-                     "recover": round(reward / a.cost, 3)})
+                     "recover": round(reward / a.cost, 3),
+                     "income_ratio": round(a.income_ratio, 4)})
     rep.tables["kill_recovery"] = rows
 
 
@@ -394,8 +396,8 @@ def analyse_players(bal: B.Balance, rep: Report) -> None:
         # 代表として、いちばん安い送りで測る
         cheapest = min(bal.attackers.values(), key=lambda a: a.cost)
         targets = players - 1
-        world_reward = bal.kill_reward(
-            next(k for k, v in bal.attackers.items() if v is cheapest)) * targets
+        cheapest_key = next(k for k, v in bal.attackers.items() if v is cheapest)
+        world_reward = bal.kill_reward(cheapest_key, targets) * targets
         ratio = world_reward / cheapest.cost
         curve = income_curve(bal, players, seconds=600)
         rows.append({
@@ -411,13 +413,13 @@ def analyse_players(bal: B.Balance, rep: Report) -> None:
 
     worst = max(rows, key=lambda r: r["world_return"])
     if worst["world_return"] > WORLD_RETURN_LIMIT:
-        current = B.KILL_REWARD_RATIO
+        current = B.KILL_REWARD_TOTAL
         suggested = round(current * WORLD_RETURN_LIMIT / worst["world_return"], 3)
         rep.add("warn", "人数",
                 f"{worst['players']} 人戦では、送り 1 回に対して世界全体の撃破報酬が "
                 f"コストの {worst['world_return']:.1f} 倍になります"
                 f"（上限 {WORLD_RETURN_LIMIT}）。送るほど相手が太ります",
-                {"path": "balance.KILL_REWARD_RATIO", "current": current,
+                {"path": "balance.KILL_REWARD_TOTAL", "current": current,
                  "suggested": suggested})
     else:
         rep.add("info", "人数",
@@ -435,12 +437,24 @@ def simulate_symmetry(games: int = 8, cap_minutes: int = 12
     ここだけは机上計算ではなく**実際に回す**。経路の形・射程の重なり・
     妨害や瞬移の効き方は、式では出てこないため。
     """
+    return {players: simulate_symmetry_one(players, games, cap_minutes)
+            for players in (2, 4, 8)}
+
+
+def simulate_symmetry_one(players: int, games: int = 8, cap_minutes: int = 12
+                          ) -> Dict[str, float]:
+    """人数 1 つぶんの対称性チェック。
+
+    人数ごとに分けてあるのは、掃引（``sweep_send_power.py``）が
+    **1 条件終わるたびに進捗を出せる**ようにするため。1 条件が数分かかるので、
+    3 人数ぶんまとめて返す作りだと途中経過が一切見えない。
+    """
     from mazeward_env.bots_heuristic import empty_action, make_bot
     from mazeward_env.env import VersusEnv
     from mazeward_env.rules import EnvConfig
 
     out: Dict[int, Dict[str, float]] = {}
-    for players in (2, 4, 8):
+    for _once in (0,):
         rng = np.random.default_rng(20240101 + players)
         env = VersusEnv(EnvConfig(num_envs=games, players_choices=(players,),
                                   board_size=21, max_ticks=20 * 60 * cap_minutes,
@@ -485,7 +499,7 @@ def simulate_symmetry(games: int = 8, cap_minutes: int = 12
             "life_regained": float(np.mean([i["life_regained"] for i in results])) if results else 0.0,
             "minutes": float(np.mean([i["ticks"] for i in results])) / 1200 if results else 0.0,
         }
-    return out
+    return out[players]
 
 
 def analyse_symmetry(sym: Dict[int, Dict[str, float]], bal: B.Balance,
@@ -526,16 +540,16 @@ def analyse_symmetry(sym: Dict[int, Dict[str, float]], bal: B.Balance,
                         f"{players} 人戦: 脱落者が 1 人も出ませんでした"
                         f"（決着率 {r['decided']:.0%}）。"
                         "守りが送りを完全に上回っていて、試合が終わりません",
-                        {"path": "balance.KILL_REWARD_RATIO",
-                         "current": B.KILL_REWARD_RATIO,
-                         "suggested": round(B.KILL_REWARD_RATIO * 0.5, 3)})
+                        {"path": "balance.KILL_REWARD_TOTAL",
+                         "current": B.KILL_REWARD_TOTAL,
+                         "suggested": round(B.KILL_REWARD_TOTAL * 0.5, 3)})
         elif share > SYMMETRY_HIGH:
             rep.add("warn", "対称性",
                     f"{players} 人戦: 守り特化の勝率 {share:.0%}（目安 40〜60%）。"
                     "送りが割に合っていません",
-                    {"path": "balance.KILL_REWARD_RATIO",
-                     "current": B.KILL_REWARD_RATIO,
-                     "suggested": round(B.KILL_REWARD_RATIO * 0.6, 3)})
+                    {"path": "balance.KILL_REWARD_TOTAL",
+                     "current": B.KILL_REWARD_TOTAL,
+                     "suggested": round(B.KILL_REWARD_TOTAL * 0.6, 3)})
         elif share < SYMMETRY_LOW:
             rep.add("warn", "対称性",
                     f"{players} 人戦: 送り特化の勝率 {1 - share:.0%}（目安 40〜60%）。"

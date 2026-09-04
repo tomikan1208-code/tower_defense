@@ -1,5 +1,7 @@
 package dev.antigravity.mazeward.run;
 
+import dev.antigravity.mazeward.tower.TowerKind;
+
 /**
  * タワー性能への恒久補正。
  *
@@ -34,5 +36,16 @@ public interface Modifiers {
 
     default double upgradeCostMultiplier() {
         return 1.0;
+    }
+
+    /**
+     * 塔を何段まで上げられるか。
+     *
+     * <p>シングルは 3 段。対戦だけ 5 段まで伸ばす（{@link TowerKind#VERSUS_MAX_LEVEL}）。
+     * 対戦の収入は指数で伸びるので、受け皿が有限だと余ったコインが
+     * 「相手を削る札」にしか流れず、経済ゲームが成立しなくなる。</p>
+     */
+    default int maxTowerLevel() {
+        return TowerKind.MAX_LEVEL;
     }
 }

@@ -11,9 +11,14 @@ import net.minestom.server.entity.EntityType;
  * FLYER（迷路無視）・BRUTE（固定装甲）・HEALER（範囲火力要求）の 3 種で
  * それぞれ別の対策を強制する。</p>
  *
- * <p>後半の 6 種は {@link Trait} で能力を持つ。こちらは
+ * <p>能力持ちの種は {@link Trait} で能力を持つ。こちらは
  * 「長い迷路 + 高 DPS の塔を並べる」という <b>防衛側の最適解そのもの</b> を
  * 崩しにいく役割で、対戦の送り合いで効いてくる。</p>
+ *
+ * <p>末尾の 6 種は <b>上位種</b>。能力は下位と同じで、体だけが太い。
+ * 対戦の経済が指数で伸びる以上、送れるものも同じ勢いで太らないと
+ * 「もう送るものがない」で成長が止まる。詳しくは
+ * {@code docs/VERSUS_ECONOMY_ja.md} を参照。</p>
  */
 public enum EnemyKind {
 
@@ -88,7 +93,43 @@ public enum EnemyKind {
      */
     REAPER("終焉騎", EntityType.WITHER_SKELETON, MoveMode.GROUND,
             260, 0.048, 6, 46, 3, 0.6, 0.0, NamedTextColor.DARK_PURPLE,
-            Trait.reaper(1));
+            Trait.reaper(1)),
+
+    // ---------------------------------------------------------------- 上位種
+    //
+    // 対戦の送りの梯子が 16 段に伸びたので、後半 6 段ぶんの体をここに足す。
+    // 能力（Trait）は下位と同じものを使い回している。**新しい咎め方を増やすのではなく、
+    // 同じ咎め方を、育った防衛にも通る太さで撃ち直せるようにする**のが上位種の役目。
+    // 新しい能力を段ごとに足すと、覚えることだけが増えて選択が濁る。
+    //
+    // 見た目だけは必ず別の EntityType にする。同じモデルで数字だけ違うと、
+    // 「いま来ているのがどっちか」が盤面から読めず、受け手が判断できない。
+
+    /** 疾走者の上位。速さはそのままに、減速をほとんど受け付けない。 */
+    SWIFTBEAST("疾風獣", EntityType.HOGLIN, MoveMode.GROUND,
+            900, 0.125, 3, 60, 2, 0.55, 0.0, NamedTextColor.DARK_GREEN),
+
+    /** 妨害者の上位。黙らせる半径も時間も伸びる。 */
+    BREAKER("破城者", EntityType.VINDICATOR, MoveMode.GROUND,
+            1400, 0.062, 4, 80, 2, 0.20, 0.0, NamedTextColor.DARK_GREEN,
+            Trait.sapper(5.0, 70)),
+
+    /** 石背の上位。装甲が厚く、減速もほとんど効かない。 */
+    IRONWALL("鉄壁", EntityType.WARDEN, MoveMode.GROUND,
+            4000, 0.030, 14, 120, 3, 0.65, 0.0, NamedTextColor.DARK_AQUA),
+
+    /** 浮遊蟲の上位。大きく、速く、迷路を無視して飛ぶ。 */
+    CANOPY("天蓋", EntityType.GHAST, MoveMode.FLYING,
+            5000, 0.062, 6, 150, 3, 0.0, 0.0, NamedTextColor.LIGHT_PURPLE),
+
+    /** 祈祷師の上位。回復量が桁で違う。 */
+    HIGHPRIEST("大祭司", EntityType.ILLUSIONER, MoveMode.GROUND,
+            6000, 0.042, 6, 180, 3, 0.10, 700.0, NamedTextColor.GOLD),
+
+    /** 分裂体の上位。倒すと 3 体に割れる。 */
+    GREATSPLITTER("大分裂体", EntityType.MAGMA_CUBE, MoveMode.GROUND,
+            8000, 0.048, 5, 220, 3, 0.0, 0.0, NamedTextColor.GREEN,
+            Trait.split(3));
 
     private final String displayName;
     private final EntityType entityType;

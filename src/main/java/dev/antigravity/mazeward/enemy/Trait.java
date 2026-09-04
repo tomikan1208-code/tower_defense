@@ -17,7 +17,7 @@ package dev.antigravity.mazeward.enemy;
  *   <li>{@code ward} — 「数字を並べれば溶ける」を止める</li>
  *   <li>{@code split} — 単体火力だけの構成を咎める</li>
  *   <li>{@code burnResist} — 炎・氷に寄せた構成を咎める</li>
- *   <li>{@code revives} — 「倒しさえすれば損はない」を崩す</li>
+ *   <li>{@code revives} — 一度倒したくらいでは終わらせない</li>
  * </ul>
  */
 public record Trait(
@@ -42,7 +42,7 @@ public record Trait(
         int splitCount,
         /** 燃焼耐性 0.0〜1.0。1.0 で完全耐性。 */
         double burnResist,
-        /** 倒れたときに出発点へ戻れる回数。戻るたびに守り手のライフ上限が 1 減る。 */
+        /** 倒れたときに出発点へ戻れる回数。もう一周させるだけで、それ自体の罰はない。 */
         int revives) {
 
     public static final Trait NONE = new Trait(0, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -158,7 +158,7 @@ public record Trait(
             return "燃えない（炎の継続ダメージが通らない）";
         }
         if (hasRevive()) {
-            return "倒れても " + revives + " 回だけ出発点へ戻り、ライフ上限を 1 奪う";
+            return "倒れても " + revives + " 回だけ出発点へ戻る（もう一周させられる）";
         }
         return "";
     }

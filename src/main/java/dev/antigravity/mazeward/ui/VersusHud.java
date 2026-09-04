@@ -48,6 +48,20 @@ public final class VersusHud {
 
     // ---------------------------------------------------------------- サイドバー
 
+    /**
+     * 対戦中のサイドバー。
+     *
+     * @param aiName 相手の AI の名前（モデル名込み）。AI が居ない試合なら null。
+     *               <b>誰と戦っているのかは資源と同じくらい常に見えていてほしい</b>
+     */
+    public static void updateSidebar(PlayerSession session, VersusPlayer self,
+                                     VersusMatch match, String aiName) {
+        updateSidebar(session, self, match);
+        if (session.sidebar() != null && aiName != null) {
+            set(session.sidebar(), "l8", Component.text(aiName, NamedTextColor.DARK_AQUA));
+        }
+    }
+
     public static void updateSidebar(PlayerSession session, VersusPlayer self, VersusMatch match) {
         Sidebar sidebar = session.sidebar();
         if (sidebar == null) {
@@ -109,7 +123,7 @@ public final class VersusHud {
 
             @Override
             public InventoryType type() {
-                return InventoryType.CHEST_4_ROW;
+                return InventoryType.CHEST_5_ROW;
             }
 
             @Override
@@ -139,20 +153,27 @@ public final class VersusHud {
         });
     }
 
-    /** 送りメニューの並び。1 段 7 枠、2 段で 14 枠まで。 */
+    /**
+     * 送りメニューの並び。1 段 7 枠 x 3 段 = 21 枠。
+     *
+     * <p>梯子が 18 段（インカム 16 + 削り切る用 2）あるので、
+     * 5 段チェストの内側 3 段を使う。上の段ほど安く、下へ行くほど重い。</p>
+     */
     private static final int ROW_WIDTH = 7;
-    private static final int CLOSE_SLOT = 31;
+    private static final int ROWS = 3;
+    private static final int[] ROW_START = {10, 19, 28};
+    private static final int CLOSE_SLOT = 40;
 
     private static int menuSlot(int index) {
-        return index < ROW_WIDTH ? 10 + index : 19 + (index - ROW_WIDTH);
+        return ROW_START[index / ROW_WIDTH] + (index % ROW_WIDTH);
     }
 
     private static int menuIndex(int slot) {
-        if (slot >= 10 && slot <= 16) {
-            return slot - 10;
-        }
-        if (slot >= 19 && slot <= 25) {
-            return ROW_WIDTH + (slot - 19);
+        for (int row = 0; row < ROWS; row++) {
+            int start = ROW_START[row];
+            if (slot >= start && slot < start + ROW_WIDTH) {
+                return row * ROW_WIDTH + (slot - start);
+            }
         }
         return -1;
     }
@@ -182,11 +203,21 @@ public final class VersusHud {
         lore.add(Component.empty());
         lore.add(Component.text("コイン " + kind.cost() + "  ストック " + kind.stockCost(),
                 self.coins() >= kind.cost() ? NamedTextColor.GREEN : NamedTextColor.RED));
-        lore.add(kind.incomeGain() > 0
-                ? Component.text("インカム +" + kind.incomeGain(), NamedTextColor.YELLOW)
-                : Component.text("インカムは増えない（削り切る用）", NamedTextColor.DARK_RED));
+        if (kind.incomeGain() > 0) {
+            // 効率が見えないと「安いのを回すか、上を撃つか」を勘で決めることになる。
+            // 上ほど比率が落ちる梯子なので、比率こそが一番大事な情報
+            lore.add(Component.text(String.format("インカム +%d（コストの %.1f%%）",
+                    kind.incomeGain(), 100.0 * kind.incomeGain() / kind.cost()),
+                    NamedTextColor.YELLOW));
+        } else {
+            lore.add(Component.text("インカムは増えない（削り切る用）", NamedTextColor.DARK_RED));
+        }
         lore.add(Component.text("相手のコアに届くと自分のライフ +1（上限まで）",
                 NamedTextColor.DARK_GREEN));
+        if (kind.stealsMaxLife()) {
+            lore.add(Component.text("コアまで通すと相手のライフ上限 -1（倒されたら何も起きない）",
+                    NamedTextColor.DARK_PURPLE));
+        }
         if (!unlocked) {
             lore.add(Component.empty());
             lore.add(Component.text("インカム " + kind.unlockIncome() + " で解禁",

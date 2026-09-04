@@ -22,12 +22,18 @@ public final class VersusPlayer implements EnemySource {
     /** 開始時のコイン。 */
     public static final int START_COINS = 100;
 
-    /** 開始時のインカム。収入間隔ごとにこの数だけコインが入る（間隔は人数で変わる）。 */
+    /** 開始時のインカム。10 秒ごとにこの数だけコインが入る（間隔は人数によらず一定）。 */
     public static final int START_INCOME = 5;
 
     public static final int START_LIVES = 20;
 
-    /** 送りモンスターのストック上限。毎秒 1 回復する。 */
+    /**
+     * 送りモンスターのストック上限。毎秒 1 回復し、<b>どれを送っても消費は 1</b>。
+     *
+     * <p>「1 秒に 1 回しか送れない」という回数制限であって、強さの値付けではない。
+     * 上位ほど重くすると 1 秒あたりに増やせるインカムに固定の天井ができ、
+     * 経済が途中で指数をやめて直線になる。</p>
+     */
     public static final int MAX_STOCK = 30;
 
     /** 送り履歴の減衰係数（10 秒 / 30 秒の時定数を 1 tick ぶんにしたもの）。 */
@@ -75,7 +81,8 @@ public final class VersusPlayer implements EnemySource {
 
     /**
      * 撃破報酬のインカム端数。
-     * 「コイン報酬の 10%」がインカムなので、1 に届くまで貯めてから加算する。
+     * 「コイン報酬の {@value AttackerKind#KILL_INCOME_RATIO}」がインカムなので、
+     * 1 に届くまで貯めてから加算する。
      */
     private double incomeProgress;
 
@@ -237,10 +244,13 @@ public final class VersusPlayer implements EnemySource {
 
     /**
      * 敵を 1 体倒した。コインは既に入っているので、ここではインカムの端数だけ進める。
-     * インカムはコイン報酬の 10%（＝送りコストの 2%）。
+     *
+     * <p>インカムはコイン報酬の {@link AttackerKind#KILL_INCOME_RATIO}。
+     * コイン報酬のほうが人数で割られているので、
+     * <b>1 回の送りが盤面に生むインカムの総量も人数によらず一定</b>になる。</p>
      */
     public void onKillReward(int coinReward) {
-        incomeProgress += coinReward * 0.10;
+        incomeProgress += coinReward * AttackerKind.KILL_INCOME_RATIO;
         while (incomeProgress >= 1.0) {
             incomeProgress -= 1.0;
             income++;
@@ -270,10 +280,10 @@ public final class VersusPlayer implements EnemySource {
     }
 
     /**
-     * ライフの上限を恒久的に奪われる（終焉騎）。
+     * ライフの上限を恒久的に奪われる（終焉騎を <b>コアまで通したとき</b>）。
      *
-     * <p>普通の漏れと違って取り返しがつかない。
-     * 「倒しさえすれば損はない」を崩すための唯一の手段なので、
+     * <p>普通の漏れと違って取り返しがつかない。倒し切れば何も起きないので、
+     * 「守り切れるか」を最後に一度だけ極大化して問う札になっている。
      * 現在ライフも一緒に減らす。</p>
      */
     public void stealMaxLife(int amount) {

@@ -2,6 +2,7 @@ package dev.antigravity.mazeward.versus;
 
 import dev.antigravity.mazeward.core.Grid;
 import dev.antigravity.mazeward.enemy.EnemyInstance;
+import dev.antigravity.mazeward.enemy.EnemyKind;
 import dev.antigravity.mazeward.run.Deck;
 import dev.antigravity.mazeward.run.Modifiers;
 import dev.antigravity.mazeward.run.Wallet;
@@ -36,6 +37,8 @@ public final class Island extends Battlefield {
 
     private final VersusMatch match;
     private final VersusPlayer owner;
+    /** まとめ送りの湧かせ待ち行列。1 送りにつき 1 要素。 */
+    private final java.util.List<Pending> pending = new java.util.ArrayList<>();
     /** スポーンが複数あるとき、送られた敵を入口ごとに散らすためのカウンタ。 */
     private int nextSpawn;
 
@@ -66,9 +69,23 @@ public final class Island extends Battlefield {
         return owner.wallet();
     }
 
+    /**
+     * 対戦の補正。レリックは無いが、<b>塔を 5 段まで上げられる</b> のがシングルとの違い。
+     *
+     * <p>置ける数が {@link #MAX_TOWERS} で頭打ちなので、指数で伸びるコインの
+     * 行き先は「上へ伸ばす」しかない。ここを 3 段のままにすると盤面がすぐ飽和し、
+     * 余ったコインが相手を削る札だけに流れる。</p>
+     */
+    private static final Modifiers VERSUS = new Modifiers() {
+        @Override
+        public int maxTowerLevel() {
+            return TowerKind.VERSUS_MAX_LEVEL;
+        }
+    };
+
     @Override
     public Modifiers modifiers() {
-        return Modifiers.NONE;
+        return VERSUS;
     }
 
     @Override
@@ -120,21 +137,29 @@ public final class Island extends Battlefield {
             broadcast(Component.text("災厄は出発点へ戻った。倒し切るまで終わらない",
                     NamedTextColor.DARK_RED));
         }
+        // 終焉騎だけは、通されるとライフ上限そのものを持っていく
+        if (enemy.kind() == EnemyKind.REAPER) {
+            owner.stealMaxLife(1);
+            broadcast(Component.text(owner.name() + " のライフ上限 -1（残り "
+                    + owner.lives() + "/" + owner.maxLives() + "）", NamedTextColor.DARK_PURPLE));
+        }
         match.onLifeLost(owner);
     }
 
     /**
-     * 終焉騎が出発点へ戻った。ライフ上限を 1 奪われる。
+     * 終焉騎を倒した。出発点へ戻すだけで、罰は与えない。
      *
-     * <p>これだけが取り返しのつかない削り方なので、全員に見えるように告知する。
-     * 「誰がもう後がないか」は送り先を決める最大の材料になる。</p>
+     * <p><b>ここで上限を奪っていた頃は、防衛に正解が存在しなかった。</b>
+     * 倒しても上限が減るなら、守りを固める意味そのものが消える。
+     * 上限を奪うのは「コアまで通されたとき」だけにして、
+     * <b>倒し切れば無傷</b>／<b>通せば取り返しがつかない</b> という
+     * タワーディフェンスとして成立する形に戻してある。
+     * 経緯は {@code docs/VERSUS_ECONOMY_ja.md} を参照。</p>
      */
     @Override
     protected void onEnemyRevived(EnemyInstance enemy, Pos at) {
-        owner.stealMaxLife(1);
-        broadcast(Component.text(owner.name() + " のライフ上限 -1（残り "
-                + owner.lives() + "/" + owner.maxLives() + "）", NamedTextColor.DARK_PURPLE));
-        match.onLifeLost(owner);
+        broadcast(Component.text(owner.name() + " の島で終焉騎が倒れた — 出発点からもう一周してくる",
+                NamedTextColor.DARK_PURPLE));
     }
 
     /**
@@ -165,10 +190,72 @@ public final class Island extends Battlefield {
      * <b>送った側のライフが 1 戻る</b> ので、誰の送りだったかが分からないと精算できない。</p>
      */
     public void receive(AttackerKind kind, VersusPlayer sender) {
+        receive(kind, sender, 1);
+    }
+
+    /**
+     * まとめて送られてきたぶんを受け取る。
+     *
+     * <p><b>一度に湧かせず、{@link VersusMatch#SEND_STAGGER_TICKS} ごとに 1 体ずつ出す。</b>
+     * 同座標に固めると範囲攻撃と連鎖が 1 塊に当たり、実際より柔らかく
+     * （単体火力には硬く）なる。人間が送りメニューを連打しても 1 体ずつ間が空くので、
+     * そちらに合わせている。</p>
+     */
+    public void receive(AttackerKind kind, VersusPlayer sender, int count) {
+        if (count <= 0) {
+            return;
+        }
+        spawnOne(kind, sender);
+        if (count > 1) {
+            pending.add(new Pending(kind, sender, count - 1,
+                    VersusMatch.SEND_STAGGER_TICKS));
+        }
+    }
+
+    /** 待ち行列の 1 体。 */
+    private static final class Pending {
+        private final AttackerKind kind;
+        private final VersusPlayer sender;
+        private int left;
+        private int wait;
+
+        private Pending(AttackerKind kind, VersusPlayer sender, int left, int wait) {
+            this.kind = kind;
+            this.sender = sender;
+            this.left = left;
+            this.wait = wait;
+        }
+    }
+
+    private void spawnOne(AttackerKind kind, VersusPlayer sender) {
         int spawn = grid.spawns().isEmpty() ? 0 : nextSpawn++ % grid.spawns().size();
-        EnemyInstance enemy = spawnEnemy(kind.body(), spawn, kind.hp(), kind.killReward());
+        // 耐力も撃破報酬も「何人に湧いたか」で正規化する。
+        // 詳しくは VersusMatch#REFERENCE_OPPONENTS / AttackerKind#KILL_REWARD_TOTAL
+        EnemyInstance enemy = spawnEnemy(kind.body(), spawn,
+                kind.hp() * match.sendPowerScale(),
+                kind.killReward(match.aliveCount() - 1));
         if (enemy != null) {
             enemy.source(sender);
+        }
+    }
+
+    /** 待ち行列を 1 tick 進め、間隔に達したものを 1 体ずつ湧かせる。 */
+    private void tickPending() {
+        if (pending.isEmpty()) {
+            return;
+        }
+        java.util.Iterator<Pending> it = pending.iterator();
+        while (it.hasNext()) {
+            Pending p = it.next();
+            if (--p.wait > 0) {
+                continue;
+            }
+            spawnOne(p.kind, p.sender);
+            if (--p.left <= 0) {
+                it.remove();
+            } else {
+                p.wait = VersusMatch.SEND_STAGGER_TICKS;
+            }
         }
     }
 
@@ -181,6 +268,7 @@ public final class Island extends Battlefield {
      * @param render 経路の表示を更新するか。倍速の途中経過では描かない
      */
     public void tick(boolean render) {
+        tickPending();
         tickBattle();
         if (render) {
             tickPathDisplay();

@@ -34,10 +34,11 @@ import balance as B
 from . import pathfinder as pf
 from .combat import BalanceTables, N_ATTACK, N_TOWER
 from .env import (A_CARD, A_SELL, A_SEND, A_SKIP, A_TOWER, A_UPGRADE,
-                  CARD_HEAD, HAND_LIMIT, N_ACTION_TYPES, TOWER_HEAD,
-                  footprint_ok_batch)
-from .grid import BORDER, CORE, OPEN, ROCK, SPAWN, WALL
-from .observation import (CH_COVERAGE, CH_FLIGHT, CH_PATH, CH_TOWER,
+                  CARD_HEAD, HAND_LIMIT, N_ACTION_TYPES, SEND_N_HEAD,
+                  TOWER_HEAD, footprint_ok_batch)
+from .grid import BORDER, CORE, OPEN, ROCK, SPAWN, WALL, big_pad_masks
+from .observation import (CH_COVERAGE, CH_FLIGHT, CH_PAD_GAIN, CH_PAD_NOW,
+                          CH_PATH, CH_TOWER,
                           ObservationBuilder, OPP_FEATURES, _safe_div,
                           build_unit_features)
 from .shapes import SHAPE_INDEX, SHAPE_ORDER, SHAPES, TOWER_SHAPES
@@ -257,6 +258,10 @@ class SnapshotEncoder:
             obs.grid[b, CH_COVERAGE] = np.minimum(bd.coverage / 4.0, 2.0)
             obs.grid[b, CH_PATH] = bd.path_mask
             obs.grid[b, CH_FLIGHT] = bd.flight_mask
+            # 大型塔の土台。学習側と同じ関数を通す (env._recompute_towers)
+            pad_now, pad_gain = big_pad_masks(bd.base_tower, bd.base_build)
+            obs.grid[b, CH_PAD_NOW] = pad_now
+            obs.grid[b, CH_PAD_GAIN] = pad_gain
 
         n = len(boards)
         max_e = max(1, max(len(bd.enemies) for bd in boards))
@@ -308,6 +313,8 @@ class SnapshotEncoder:
         sends_total = np.array([bd.sends.get("total", 0) for bd in boards],
                                dtype=np.float32)
 
+        # 送りが湧く島の数。撃破報酬の 1 体あたりの取り分がこれで決まる
+        opp_alive = np.maximum(1.0, alive.sum() - 1.0)
         income_safe = np.maximum(income, 1.0)
         cheap_tower = t.tw_cost[env].min(axis=1).astype(np.float32)
         unlocked = income[:, None] >= t.at_unlock[env]
@@ -321,7 +328,8 @@ class SnapshotEncoder:
             _safe_div(cheap_tower, income_safe),
             _safe_div(send_cost, income_safe),
             _safe_div(mean_up, income_safe),
-            _safe_div(t.at_reward[env].mean(axis=1), t.at_cost[env].mean(axis=1)),
+            _safe_div(t.at_reward_total[env].mean(axis=1),
+                      t.at_cost[env].mean(axis=1) * np.maximum(1.0, opp_alive)),
             hand_n / HAND_LIMIT,
             pile_n / self.lib_size,
             np.full(n, min(1.0, (tick % card_interval) / max(card_interval, 1.0)),
@@ -351,7 +359,8 @@ class SnapshotEncoder:
         block = np.nan_to_num(np.stack(col, axis=1).astype(np.float32),
                               nan=0.0, posinf=10.0, neginf=-10.0)
         units = np.nan_to_num(
-            build_unit_features(t, env, income, coins, stock, size),
+            build_unit_features(t, env, income, coins, stock, size,
+                                np.full(n, opp_alive, dtype=np.float32)),
             nan=0.0, posinf=10.0, neginf=-10.0)
         return np.concatenate([block, units], axis=1)
 
@@ -457,6 +466,16 @@ class SnapshotEncoder:
                    & (stock[:, None] >= t.at_stock[env]))
         mask_send = unlocked & can_pay & (not preparing)
 
+        # 何体まとめて送れるか。env と同じく「いちばん安い送れるもの」基準の上限。
+        # 実際の数は Java 側が min(ストック, コイン // コスト) で切り詰める
+        cheapest = np.where(mask_send, t.at_cost[env], 10 ** 9).min(axis=1)
+        affordable = np.where(cheapest > 0, coins // np.maximum(cheapest, 1), 0)
+        max_batch = np.minimum(np.minimum(affordable.astype(np.int64),
+                                          stock.astype(np.int64)),
+                               SEND_N_HEAD)
+        max_batch = np.where(mask_send.any(axis=1), np.maximum(max_batch, 1), 0)
+        mask_send_n = np.arange(SEND_N_HEAD)[None, :] < max_batch[:, None]
+
         mask_type = np.zeros((n, N_ACTION_TYPES), dtype=bool)
         mask_type[:, A_CARD] = mask_card.any(axis=1)
         mask_type[:, A_TOWER] = mask_tower.any(axis=1)
@@ -473,6 +492,7 @@ class SnapshotEncoder:
             "mask_unit_upgrade": mask_up & live[:, None],
             "mask_unit_sell": mask_sell & live[:, None],
             "mask_send": mask_send & live[:, None],
+            "mask_send_n": mask_send_n & live[:, None],
         }
 
     # ================================================================ セルマスク

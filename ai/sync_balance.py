@@ -249,13 +249,11 @@ def run() -> Report:
         rep.check(f"economy.{name}", _constant(player_text, name), value)
     for name, value in (("PREP_TICKS", eco.prep_ticks),
                         ("INCOME_INTERVAL", eco.income_interval),
-                        ("MIN_INCOME_INTERVAL", eco.min_income_interval),
                         ("STOCK_INTERVAL", eco.stock_interval),
                         ("SUDDEN_DEATH_TICKS", eco.sudden_death_ticks),
                         ("CARD_INTERVAL", eco.card_interval),
                         ("HAND_LIMIT", eco.hand_limit),
-                        ("START_HAND", eco.start_hand),
-                        ("FULL_LOBBY", eco.full_lobby)):
+                        ("START_HAND", eco.start_hand)):
         rep.check(f"economy.{name}", _constant(match_text, name), value)
     rep.check("economy.MAX_TOWERS", _constant(island_text, "MAX_TOWERS"),
               eco.max_towers)
@@ -274,15 +272,43 @@ def run() -> Report:
 
     # --- 式の係数（数値ではなく計算式そのもの） ---
     checks = [
-        ("formula.upgrade_cost",
+        # シングルは等差のまま、対戦だけ等比 (TowerKind#upgradeCost)
+        ("formula.upgrade_cost_single",
          r"baseCost\s*\*\s*\(0\.7\s*\+\s*0\.55", tower_text),
-        ("formula.level_damage", r"1\.0\s*\+\s*0\.55\s*\*\s*level", tower_text),
+        ("formula.upgrade_cost_versus",
+         rf"baseCost\s*\*\s*{B.UPGRADE_COST_SCALE}\s*\*\s*Math\.pow\("
+         rf"{B.UPGRADE_COST_GROWTH},\s*level\)", tower_text),
+        # 送りの厚みは人数で正規化する
+        ("formula.send_power_scale",
+         rf"REFERENCE_OPPONENTS\s*=\s*{B.REFERENCE_OPPONENTS}", match_text),
+        ("formula.send_power_applied",
+         r"kind\.hp\(\)\s*\*\s*match\.sendPowerScale\(\)", island_text),
+        # まとめ送り（1 手で複数体）とずらし湧き
+        ("formula.max_send_batch",
+         rf"MAX_SEND_BATCH\s*=\s*VersusPlayer\.MAX_STOCK", match_text),
+        ("formula.send_stagger",
+         rf"SEND_STAGGER_TICKS\s*=\s*{B.SEND_STAGGER_TICKS}", match_text),
+        ("formula.send_power_exponent",
+         rf"SEND_POWER_EXPONENT\s*=\s*{B.SEND_POWER_EXPONENT}", match_text),
+        ("formula.versus_max_level",
+         rf"VERSUS_MAX_LEVEL\s*=\s*{B.MAX_TOWER_LEVEL}", tower_text),
+        ("formula.level_damage",
+         rf"Math\.pow\({B.LEVEL_DAMAGE_GROWTH},\s*level\)", tower_text),
         ("formula.level_range", r"baseRange\s*\+\s*0\.6\s*\*\s*level", tower_text),
         ("formula.level_cooldown", r"Math\.pow\(0\.88,\s*level\)", tower_text),
         ("formula.sell_refund", r"investedGold\s*\*\s*0\.6",
          _strip_comments(_read("tower", "TowerInstance.java"))),
-        ("formula.kill_reward", r"cost\s*\*\s*0\.20", atk_text),
-        ("formula.kill_income", r"coinReward\s*\*\s*0\.10", player_text),
+        # 撃破報酬は総量を人数で割る（人数によらず一定）
+        ("formula.kill_reward",
+         rf"KILL_REWARD_TOTAL\s*=\s*{B.KILL_REWARD_TOTAL}", atk_text),
+        ("formula.kill_reward_split",
+         r"cost\s*\*\s*KILL_REWARD_TOTAL\s*/\s*targets", atk_text),
+        ("formula.kill_income",
+         r"coinReward\s*\*\s*AttackerKind\.KILL_INCOME_RATIO", player_text),
+        # ライフ上限を奪うのは「コアまで通されたとき」だけ
+        ("formula.max_life_steal_on_leak",
+         r"onEnemyLeaked[\s\S]{0,900}?EnemyKind\.REAPER[\s\S]{0,200}?"
+         r"owner\.stealMaxLife\(1\)", island_text),
         # 送りがコアに届いたとき、送り主のライフが戻る（上限まで）
         ("formula.leak_life_reward",
          rf"sender\.gainLife\({B.LEAK_LIFE_REWARD}\)", island_text),

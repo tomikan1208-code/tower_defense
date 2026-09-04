@@ -43,7 +43,8 @@ import balance as B
 from . import pathfinder as pf
 from . import reward as R
 from .combat import BalanceTables, Boards, N_ATTACK, N_TOWER
-from .grid import CORE, OPEN, ROCK, SPAWN, WALL, Grid, generate_board
+from .grid import (CORE, OPEN, ROCK, SPAWN, WALL, Grid, big_pad_masks,
+                   generate_board)
 from .observation import (OPP_FEATURES, SCALAR_DIM, ObservationBuilder,
                           _safe_div, build_unit_features)
 from .rules import EnvConfig
@@ -61,10 +62,31 @@ SPEC_HEAD = 2
 SEND_HEAD = N_ATTACK
 UNIT_HEAD = B.ECONOMY.max_towers
 
+#: 「1 回の行動で何体送るか」。1 〜 :data:`balance.MAX_SEND_BATCH`。
+#:
+#: **これが無いと、送りに毎秒まるごと 1 手を使うことになる。**
+#: ストックは毎秒 1 回復・消費 1 なので持続レートは 1 体 / 秒で変わらないが、
+#: 1 手で複数体送れれば残りの手を建設に回せる。ゲーム本体は元から
+#: 「溜めたストック（最大 30）を連打で撃てる」ので、
+#: **これは新しいルールではなく、環境の再現漏れを埋めるもの**。
+SEND_N_HEAD = B.MAX_SEND_BATCH
+
 #: カウンタープッシュを「直後」と見なす時間（10 秒）
 COUNTER_PUSH_TICKS = 20 * 10
 #: 「弱っている相手」と見なすライフ比
 PRESSURE_LIFE_RATIO = 0.30
+#: 累積被ダメージを測るときに想定する敵の流量（体 / 秒）。
+#: 塔 1 基が同時に何体を相手にしているかを決める。0 に近いほど
+#: 「単体の敵を測る」古い挙動に戻り、大きいほど飽和した戦闘に近づく。
+#: **大きすぎると盤面の形が消える。** 完全に飽和した極限では
+#: 1 体あたりの被ダメが (Σ DPS x 同時ヒット数) / λ に収束し、経路長も
+#: 塔の配置も式から落ちる（0.5 にしたら経路 66.8 と 40.4 の盤面が
+#: 同じ値になった）。実際の試合はそこまで飽和しないので控えめに取る
+LOAD_RATE = 0.2
+#: 累積被ダメージを測るときの基準の敵の速度（ブロック / tick）。
+#: 盤面の強さを比べるための物差しなので、実際に何が飛んでくるかとは切り離す。
+#: 同じ試合の全員が同じ物差しで測られればよく、Φ では相手との差にしか使わない
+REF_SPEED = B.ENEMIES["GRUNT"].base_speed
 
 ACTION_HEADS = {
     "type": N_ACTION_TYPES,
@@ -74,6 +96,7 @@ ACTION_HEADS = {
     "unit": UNIT_HEAD,
     "spec": SPEC_HEAD,
     "send": SEND_HEAD,
+    "send_n": SEND_N_HEAD,
 }
 
 
@@ -111,7 +134,8 @@ class VersusEnv:
                                           for _ in range(self.n_envs)]
         self.tables = BalanceTables(self.balances)
         self.boards = Boards(self.n, self.env_of, self.tables,
-                             self.size, B.BOARD.spawns)
+                             self.size, B.BOARD.spawns,
+                             max_enemies=cfg.max_enemies)
         self.boards.env_ref = self
         self.obs = ObservationBuilder(self.n, self.size, self.max_towers)
 
@@ -158,6 +182,9 @@ class VersusEnv:
         self.coverage = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=np.float32)
         self.base_build = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=bool)
         self.base_tower = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=bool)
+        #: 大型塔（2x2 / 1x3）の土台。いま置ける / あと 1 マスで置ける
+        self.pad_now = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=bool)
+        self.pad_gain = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=bool)
         self._raw_tower_base = np.zeros((n, B.MAX_BOARD, B.MAX_BOARD), dtype=bool)
         self.static_ch = np.zeros((n, 7, B.MAX_BOARD, B.MAX_BOARD), dtype=np.float32)
         # セル中心の座標。射程カバレッジで毎回 mgrid を作ると効いてくる
@@ -167,6 +194,8 @@ class VersusEnv:
         self.ground_len = np.zeros(n, dtype=np.float32)
         self.tower_passes = np.zeros(n, dtype=np.float32)
         self.weighted_path = np.zeros(n, dtype=np.float32)
+        #: 経路踏破時の累積被ダメージ（:meth:`_path_threat`）
+        self.path_threat = np.zeros(n, dtype=np.float32)
         self.path_cell_list: List[np.ndarray] = [np.zeros((0, 2), np.int32)] * n
 
         # 指標
@@ -175,13 +204,17 @@ class VersusEnv:
         self.stat_sends = np.zeros(n, dtype=np.float32)
         self.stat_sends_by_kind = np.zeros((n, N_ATTACK), dtype=np.float32)
         self.stat_leaks_by_kind = np.zeros((n, N_ATTACK), dtype=np.float32)
+        #: この島に湧いた敵の種類別内訳。``stat_leaks_by_kind`` と割れば
+        #: 「その送りは実際に通るのか」という突破率になる
+        self.stat_spawned_by_kind = np.zeros((n, N_ATTACK), dtype=np.float32)
         self.stat_invalid = np.zeros(n, dtype=np.float32)
         self.stat_steps = np.zeros(n, dtype=np.float32)
         self.cp_chances = np.zeros(n, dtype=np.float32)
         self.cp_hits = np.zeros(n, dtype=np.float32)
         self.final_rank = np.zeros(n, dtype=np.int32)
 
-        self._prev_weighted = np.zeros(n, dtype=np.float32)
+        #: 前ステップのポテンシャル Φ(s)。整形報酬はこの差分だけ
+        self._prev_phi = np.zeros(n, dtype=np.float32)
         self._acted = np.zeros(n, dtype=bool)
         self._invalid_step = np.zeros(n, dtype=np.float32)
         self._masks: Dict[str, np.ndarray] = {}
@@ -191,6 +224,7 @@ class VersusEnv:
         for e in range(self.n_envs):
             self._reset_env(e)
         self.boards.refresh_tower_stats()
+        self._prev_phi = self._potential()
         return self.observe()
 
     def _reset_env(self, e: int) -> None:
@@ -227,11 +261,10 @@ class VersusEnv:
                      "tw_burn_ticks", "tw_banish", "tw_vuln", "tw_vuln_ticks",
                      "tw_boost_dmg", "tw_boost_rate", "tw_cost", "tw_upgrade",
                      "tw_invested", "at_cost", "at_income", "at_stock",
-                     "at_unlock", "at_hp", "at_reward", "en_speed", "en_armor",
+                     "at_unlock", "at_hp", "at_reward_total", "en_speed", "en_armor",
                      "en_slow_resist", "en_heal", "start_coins", "start_income",
                      "start_lives", "max_stock", "max_towers", "prep_ticks",
-                     "income_interval", "min_income_interval", "full_lobby",
-                     "income_step", "stock_interval", "sudden_death",
+                     "income_interval", "stock_interval", "sudden_death",
                      "card_interval", "hand_limit", "start_hand"):
             getattr(self.tables, name)[e] = getattr(one, name)[0]
 
@@ -256,6 +289,11 @@ class VersusEnv:
         bd.en_progress[b] = 0.0
         bd.en_sender[b] = -1
         bd.en_count[b] = 0
+        # まとめ送りの待ち行列も空にする。残すと前の試合の敵が湧いてくる
+        bd.pend_kind[b] = -1
+        bd.pend_sender[b] = -1
+        bd.pend_left[b] = 0
+        bd.pend_spawn[b] = 0
 
         bd.coins[b] = t.start_coins[e]
         bd.income[b] = t.start_income[e]
@@ -266,7 +304,9 @@ class VersusEnv:
         bd.alive[b] = active
         for name in ("stat_leaks", "stat_kills", "stat_coins_earned",
                      "stat_idle_slots", "stat_tower_slots", "stat_max_life_lost",
-                     "stat_life_regained", "stat_breakthrough"):
+                     "stat_life_regained", "stat_breakthrough",
+                     "stat_spawn_asked", "stat_spawn_dropped",
+                     "stat_damage_by_kind", "stat_kills_by_kind"):
             getattr(bd, name)[b] = 0
 
         # デッキ: ライブラリを切って山札にし、開幕の手札を引く
@@ -287,13 +327,13 @@ class VersusEnv:
             getattr(self, name)[b] = 0.0
         self.stat_sends_by_kind[b] = 0.0
         self.stat_leaks_by_kind[b] = 0.0
+        self.stat_spawned_by_kind[b] = 0.0
         self.stat_cards_drawn[b] = float(t.start_hand[e])
         self.final_rank[b] = 0
 
         self.tower_occ[b] = False
         self.coverage[b] = 0.0
         self._recompute_board(b)
-        self._prev_weighted[b] = self.weighted_path[b]
 
     # ================================================================ 派生量
     def _recompute_board(self, b: int, walls_changed: bool = True) -> None:
@@ -376,6 +416,7 @@ class VersusEnv:
         cov = np.zeros((B.MAX_BOARD, B.MAX_BOARD), dtype=np.float32)
         passes = 0.0
         weighted = float(len(path_cells))
+        threat = 0.0
         if len(live):
             tx, tz = bd.tw_x[b, live], bd.tw_z[b, live]
             rng_ = bd._st_range[b, live]
@@ -392,9 +433,58 @@ class VersusEnv:
                 prev[:, 1:] = on[:, :-1]
                 passes = float((on & ~prev).sum())
                 weighted = float((1.0 + on.sum(axis=0)).sum())
+                threat = self._path_threat(b, live, on)
         self.coverage[b] = cov
         self.tower_passes[b] = passes
         self.weighted_path[b] = weighted
+        self.path_threat[b] = threat
+        self.pad_now[b], self.pad_gain[b] = big_pad_masks(self.base_tower[b],
+                                                          self.base_build[b])
+
+    def _path_threat(self, b: int, live: np.ndarray, on: np.ndarray) -> float:
+        """基準の敵 1 体が湧き点からコアまで歩くあいだに受ける合計ダメージ。
+
+        **単体で歩く敵ではなく、流れてくる敵の 1 体を測る。** ここが要。
+        素朴に「滞在時間 x 射程内の塔の DPS」を積分すると、氷塔が実際より
+        遥かに強く見える。ベンチで実測したときも、氷塔を 34% 混ぜた構成は
+        この指標が最大（149,557）なのに**漏れ率は下から 2 番目**だった。
+
+        理由は塔の火力が **的の間で分割される**こと。敵が λ 体/秒で流れてくると、
+        ある塔の射程内には同時に λ x (射程内の滞在時間) 体がいる。1 体が受ける
+        ダメージはそのぶん割られるので、
+
+            減速で滞在時間が 2 倍 → 同時に射程内にいる敵も 2 倍 → **相殺**
+
+        となり、飽和している塔にとって減速は総ダメージを増やさない。
+        減速が効くのは **塔が暇なとき**（射程内に敵がいない時間があるとき）だけ。
+        逆に splash と chain は「同時に何体叩けるか」なので、
+        飽和しているときにこそ効く。素朴な積分はこれを 1 つも表せていなかった。
+
+        なお近似は残る。燃焼は的で割らない（当たった敵ごとに乗るため）。
+        飛行敵は迷路を無視するのでこの指標に入らない。送還塔も表現できていない。
+        """
+        bd = self.boards
+        cd = np.maximum(bd._st_cooldown[b, live], 1.0)
+        dps = bd._st_damage[b, live] / cd * B.TICKS_PER_SECOND
+        burn = bd._st_burn[b, live]
+
+        # --- セルごと: 滞在時間と脆弱化（どちらも実装に合わせて最大値で重ねる） ---
+        cell_slow = np.minimum((on * bd._st_slow[b, live][:, None]).max(axis=0),
+                               B.SLOW_CAP)
+        cell_vuln = (on * bd._st_vuln[b, live][:, None]).max(axis=0)
+        speed = REF_SPEED * (1.0 - cell_slow)                    # ブロック/tick
+        dwell = 1.0 / np.maximum(speed, 1e-6) / B.TICKS_PER_SECOND   # 秒
+
+        # --- 塔ごと: 射程内の滞在時間から「同時に何体を相手にしているか」 ---
+        in_range_time = on @ dwell                               # (T,) 秒
+        rivals = LOAD_RATE * in_range_time                       # 同時に射程内にいる敵
+        # 同時に叩ける体数。splash は半径から、chain は的の数から見積もる
+        hits = (1.0 + bd._st_splash[b, live]
+                + bd._st_chain[b, live].astype(np.float32))
+        share = np.minimum(1.0, hits / np.maximum(rivals, 1e-6))
+
+        cell_dps = on.T @ (dps * share + burn)                   # (L,)
+        return float((dwell * cell_dps * (1.0 + cell_vuln)).sum())
 
     # ================================================================ カード
     def _draw(self, boards: np.ndarray, count: int = 1) -> None:
@@ -466,6 +556,19 @@ class VersusEnv:
         limit = np.arange(N_ATTACK)[None, :] < self.cfg.attacker_limit
         mask_send = unlocked & can_pay & ~preparing & limit
 
+        # 何体まとめて送れるか。**種類ヘッドと独立に選ばせるので、
+        # ここでは「いちばん安い送れるもの」を基準にした上限しか出せない。**
+        # 実際にいくつ通るかは実行時に min(ストック, コイン // コスト) で
+        # 切り詰める（`_do_sends`）。切り詰めは空振り扱いにしない —
+        # 「30 送ろうとして 7 しか送れなかった」は失敗ではなく普通の判断なので、
+        # ここで罰を出すと大きい数を選ぶこと自体を怖がるようになる
+        cheapest = np.where(mask_send, t.at_cost[env], 10 ** 9).min(axis=1)
+        affordable = np.where(cheapest > 0, bd.coins // np.maximum(cheapest, 1), 0)
+        max_batch = np.minimum(np.minimum(affordable, bd.stock.astype(np.int64)),
+                               SEND_N_HEAD).astype(np.int64)
+        max_batch = np.where(mask_send.any(axis=1), np.maximum(max_batch, 1), 0)
+        mask_send_n = np.arange(SEND_N_HEAD)[None, :] < max_batch[:, None]
+
         mask_type = np.zeros((self.n, N_ACTION_TYPES), dtype=bool)
         mask_type[:, A_SKIP] = True
         mask_type[:, A_CARD] = mask_card.any(axis=1)
@@ -483,6 +586,7 @@ class VersusEnv:
             "unit_upgrade": mask_up & live[:, None],
             "unit_sell": has_tower & live[:, None],
             "send": mask_send & live[:, None],
+            "send_n": mask_send_n & live[:, None],
         }
         return self._masks
 
@@ -532,11 +636,7 @@ class VersusEnv:
         dt = cfg.decision_ticks
 
         live = self.active & bd.alive & ~self.env_done[env]
-        coins_before = bd.coins.copy()
-        lives_before = bd.lives.copy()
         max_lives_before = bd.max_lives.copy()
-        idle_before = bd.stat_idle_slots.copy()
-        slots_before = bd.stat_tower_slots.copy()
 
         a_type = np.where(live, action["type"], A_SKIP)
         self._acted[:] = False
@@ -571,9 +671,7 @@ class VersusEnv:
         self.env_tick += dt
         self.stat_steps[live] += 1.0
 
-        rewards, dones, infos = self._settle(
-            live, coins_before, lives_before, max_lives_before,
-            idle_before, slots_before, sent)
+        rewards, dones, infos = self._settle(live, max_lives_before, sent)
         return self.observe(), rewards, dones, infos
 
     # ---------------------------------------------------------------- 行動
@@ -772,24 +870,37 @@ class VersusEnv:
         if len(boards) == 0:
             return sent
 
-        bd.coins[boards] -= t.at_cost[env, kinds]
-        bd.stock[boards] -= t.at_stock[env, kinds]
-        bd.income[boards] += t.at_income[env, kinds]
+        # 何体まとめて送るか。**払える数まで黙って切り詰める。**
+        # 「30 送ろうとして 7 しか送れなかった」は失敗ではなく普通の判断なので、
+        # ここを空振り扱いにすると大きい数を選ぶこと自体を怖がるようになる
+        want = action.get("send_n")
+        want = (np.ones(len(boards), dtype=np.int64) if want is None
+                else want[boards].astype(np.int64) + 1)
+        cost = t.at_cost[env, kinds].astype(np.int64)
+        stock_cost = np.maximum(t.at_stock[env, kinds].astype(np.int64), 1)
+        count = np.minimum(want, bd.coins[boards].astype(np.int64) // np.maximum(cost, 1))
+        count = np.minimum(count, bd.stock[boards].astype(np.int64) // stock_cost)
+        count = np.clip(count, 1, B.MAX_SEND_BATCH)
+
+        bd.coins[boards] -= cost * count
+        bd.stock[boards] -= stock_cost * count
+        bd.income[boards] += t.at_income[env, kinds] * count
         sent[boards] = True
         self._acted[boards] = True
-        self.stat_sends[boards] += 1.0
-        np.add.at(self.stat_sends_by_kind, (boards, kinds), 1.0)
-        self.sends_total[boards] += 1.0
+        self.stat_sends[boards] += count
+        np.add.at(self.stat_sends_by_kind, (boards, kinds), count.astype(np.float64))
+        self.sends_total[boards] += count
         self.last_send_tick[boards] = self.env_tick[env]
-        self.last_send_cost[boards] = t.at_cost[env, kinds]
-        self.sent_income[boards] += t.at_income[env, kinds]
-        self.send_decay10[boards] += 1.0
-        self.send_decay30[boards] += 1.0
+        self.last_send_cost[boards] = cost * count
+        self.sent_income[boards] += t.at_income[env, kinds] * count
+        self.send_decay10[boards] += count
+        self.send_decay30[boards] += count
 
         targets: List[int] = []
         kind_list: List[int] = []
         senders: List[int] = []
-        for b, k in zip(boards, kinds):
+        counts: List[int] = []
+        for b, k, n in zip(boards, kinds, count):
             e = int(self.env_of[b])
             base = e * self.seats
             for seat in range(int(self.env_players[e])):
@@ -801,10 +912,15 @@ class VersusEnv:
                 # 誰の送りかを敵に持たせる。コアまで通ったときに
                 # 送った側のライフが 1 戻るので、精算に要る
                 senders.append(int(b))
+                counts.append(int(n))
         if targets:
-            bd.spawn(np.array(targets, dtype=np.int64),
-                     np.array(kind_list, dtype=np.int64),
-                     sender=np.array(senders, dtype=np.int64))
+            # **一度に湧かせず待ち行列へ積む。** 戦闘サブステップ（0.2 秒）ごとに
+            # 1 体ずつ出る。同座標に固めると範囲攻撃と連鎖が 1 塊に当たり、
+            # 実際より柔らかく見えてしまう (Combat#queue_sends)
+            bd.queue_sends(np.array(targets, dtype=np.int64),
+                           np.array(kind_list, dtype=np.int64),
+                           np.array(counts, dtype=np.int64),
+                           np.array(senders, dtype=np.int64))
         return sent
 
     # ---------------------------------------------------------------- 時間
@@ -818,13 +934,11 @@ class VersusEnv:
         bd.stock = np.minimum(t.max_stock[env], bd.stock + whole)
         self.stock_progress -= whole
 
-        # 収入。間隔は生存者数で変わる（少人数ほど速い）ので剰余ではなく
-        # 専用タイマーで数える。 (VersusMatch#incomeInterval)
-        alive_count = np.zeros(self.n_envs, dtype=np.int32)
-        np.add.at(alive_count, env, (bd.alive & self.active).astype(np.int32))
-        a = np.clip(alive_count, 2, t.full_lobby)
-        interval = np.maximum(t.min_income_interval,
-                              t.income_interval - (t.full_lobby - a) * t.income_step)
+        # 収入。**間隔は人数によらず一定** (VersusMatch#incomeInterval)。
+        # かつては少人数ほど速くしていたが、この補正は指数の肩に乗る
+        # （インカムは「収入間隔ぶんの一」の速さで自己増殖する）。
+        # 少人数の不利は撃破報酬の総量固定 (KILL_REWARD_TOTAL) 側で埋めてある。
+        interval = t.income_interval
         self.env_income_timer += dt
         pay = self.env_income_timer >= interval
         if pay.any():
@@ -844,27 +958,21 @@ class VersusEnv:
         self.send_decay30 *= math.exp(-dt / 600.0)
 
     # ---------------------------------------------------------------- 決着
-    def _settle(self, live, coins_before, lives_before, max_lives_before,
-                idle_before, slots_before, sent):
+    def _settle(self, live, max_lives_before, sent):
         bd, t = self.boards, self.tables
         env = self.env_of
         cfg = self.cfg
 
-        coins_gained = np.maximum(0.0, bd.coins - coins_before)
-        lives_lost = np.maximum(0.0, lives_before - bd.lives)
-        # 送りが通ってライフが戻ったぶん。減少と対称に扱う
-        lives_gained = np.maximum(0.0, bd.lives - lives_before)
         max_lost = np.maximum(0.0, max_lives_before - bd.max_lives)
-        slots = np.maximum(bd.stat_tower_slots - slots_before, 1.0)
-        idle_rate = (bd.stat_idle_slots - idle_before) / slots
         hand_full = ((self.hand_n >= t.hand_limit[env]) & ~self._acted
                      & live).astype(np.float32)
-        cov_delta = (self.weighted_path - self._prev_weighted) / max(self.size * 4.0, 1.0)
-        self._prev_weighted = self.weighted_path.copy()
 
-        rewards = R.step_reward(coins_gained, lives_lost, max_lost, cov_delta,
-                                idle_rate, hand_full, self._invalid_step,
-                                lives_gained)
+        # ---- ポテンシャル整形。総和は Φ の差にしかならない ----
+        phi = self._potential()
+        shaped = R.shaping(self._prev_phi, phi)
+        self._prev_phi = phi
+
+        rewards = R.step_reward(shaped, hand_full, self._invalid_step, max_lost)
         rewards = np.where(live, rewards, 0.0).astype(np.float32)
 
         # カウンタープッシュの機会と実行を数える（指標。報酬にはしない）
@@ -897,7 +1005,50 @@ class VersusEnv:
             for e in np.flatnonzero(finished):
                 self._reset_env(int(e))
             self.boards.refresh_tower_stats()
+            # 新しい試合の Φ を基準にし直す。ここを忘れると
+            # 「前の試合の終盤」と「次の試合の開幕」の差が報酬になる
+            self._prev_phi = self._potential()
         return rewards, dones, infos
+
+    def _potential(self) -> np.ndarray:
+        """盤面の良さ Φ(s)。**相手との差**で作る (:mod:`reward`)。
+
+        自分の絶対値（コインやインカムそのもの）にすると、両者が一緒に太るだけで
+        いくらでも稼げてしまう。壊れていた前の報酬がまさにそれだった。
+        """
+        bd, t = self.boards, self.tables
+        env = self.env_of
+        live = (self.active & bd.alive).astype(np.float32)
+        #: **脱落した相手も分母に残す。** 生存者だけで平均すると、弱った相手が
+        #: 落ちた瞬間に平均が跳ね上がり、自分は何もしていないのに Φ が下がる
+        #: （＝第三者の脱落が罰になる）。脱落者はライフもインカムも 0 として数える。
+        seated = self.active.astype(np.float32)
+
+        start = np.maximum(t.start_lives[env].astype(np.float32), 1.0)
+        life_ratio = bd.lives.astype(np.float32) / start * live
+        income = bd.income.astype(np.float32) * live
+        threat = self.path_threat * live
+        path = self.weighted_path * live
+
+        count = np.zeros(self.n_envs, dtype=np.float32)
+        sum_life = np.zeros(self.n_envs, dtype=np.float32)
+        sum_income = np.zeros(self.n_envs, dtype=np.float32)
+        sum_threat = np.zeros(self.n_envs, dtype=np.float32)
+        sum_path = np.zeros(self.n_envs, dtype=np.float32)
+        np.add.at(count, env, seated)
+        np.add.at(sum_life, env, life_ratio)
+        np.add.at(sum_income, env, income)
+        np.add.at(sum_threat, env, threat)
+        np.add.at(sum_path, env, path)
+        others = np.maximum(count[env] - seated, 1.0)
+        opp_life = (sum_life[env] - life_ratio) / others
+        opp_income = (sum_income[env] - income) / others
+        opp_threat = (sum_threat[env] - threat) / others
+        opp_path = (sum_path[env] - path) / others
+
+        phi = R.potential(life_ratio, opp_life, income, opp_income,
+                          threat, opp_threat, path, opp_path)
+        return np.where(live > 0, phi, 0.0).astype(np.float32)
 
     def _opponent_sent_recently(self) -> np.ndarray:
         """直近 10 秒以内に **誰か他の生存者が送ったか**。
@@ -975,6 +1126,55 @@ class VersusEnv:
         leak_type_rates = {B.ATTACKER_ORDER[i]: float(leaks_k[i] / total_leaks) if total_leaks > 0 else 0.0
                            for i in range(N_ATTACK)}
 
+        # **送りの種類ごとの突破率。** 「漏れのうち何割がこの種類か」ではなく
+        # 「この種類を送ったら何割が通るか」。バランス調整で見たいのは後者で、
+        # 前者は送った回数の多い安い敵が自動的に上に来てしまう
+        spawned_k = self.stat_spawned_by_kind[seats].sum(axis=0)
+        breakthrough_rates = {
+            B.ATTACKER_ORDER[i]: (float(leaks_k[i] / spawned_k[i])
+                                  if spawned_k[i] > 0 else None)
+            for i in range(N_ATTACK)}
+
+        # **席ごとの内訳。** 平均だけだと勝った側と負けた側が混ざり、
+        # 「どの構成が勝つのか」を後から問えない（バランス判断の核心なのに）
+        per_seat = []
+        for i, s in enumerate(seats):
+            c = int(bd.tw_count[s])
+            kinds = bd.tw_kind[s, :c]
+            counts = {B.TOWER_ORDER[k]: int((kinds == k).sum())
+                      for k in range(N_TOWER) if (kinds == k).any()}
+            asked = float(bd.stat_spawn_asked[s])
+            dmg = bd.stat_damage_by_kind[s]
+            kills_k = bd.stat_kills_by_kind[s]
+            total_dmg = float(dmg.sum())
+            per_seat.append({
+                "rank": int(rank[i]),
+                "won": bool(rank[i] == 0),
+                "alive": bool(bd.alive[s]),
+                "lives": float(bd.lives[s]),
+                "towers": int(c),
+                "tower_avg_level": float(bd.tw_level[s, :c].mean()) if c else 0.0,
+                "tower_counts": counts,
+                "income": float(bd.income[s]),
+                "sends": float(self.stat_sends[s]),
+                "leaks": float(bd.stat_leaks[s]),
+                "received": asked,
+                "spawn_dropped": float(bd.stat_spawn_dropped[s]),
+                "leak_rate": (float(bd.stat_leaks[s]) / asked) if asked > 0 else None,
+                "kills": float(bd.stat_kills[s]),
+                "coins_earned": float(bd.stat_coins_earned[s]),
+                "path_length": float(self.ground_len[s]),
+                "path_threat": float(self.path_threat[s]),
+                "breakthroughs": float(bd.stat_breakthrough[s]),
+                # **塔の種類ごとの与ダメージ功績**（バフ・デバフで増えたぶんは
+                # 供給元へ、範囲・連鎖・貫通・燃焼の巻き添えも全部込み）
+                "damage_total": total_dmg,
+                "damage_by_kind": {B.TOWER_ORDER[k]: float(dmg[k])
+                                   for k in range(N_TOWER) if dmg[k] > 0},
+                "kills_by_kind": {B.TOWER_ORDER[k]: float(kills_k[k])
+                                  for k in range(N_TOWER) if kills_k[k] > 0},
+            })
+
         return {
             "env": e,
             "episode": int(self.env_episode[e]),
@@ -991,12 +1191,18 @@ class VersusEnv:
             "tower_type_rates": tw_type_rates,
             "send_type_rates": send_type_rates,
             "leak_type_rates": leak_type_rates,
+            "breakthrough_rates": breakthrough_rates,
+            "per_seat": per_seat,
+            "spawn_dropped": float(bd.stat_spawn_dropped[seats].mean()),
             "income": float(bd.income[seats].mean()),
             "sends": float(self.stat_sends[seats].mean()),
             "leaks": float(bd.stat_leaks[seats].mean()),
             "breakthroughs": float(bd.stat_breakthrough[seats].mean()),
             "life_regained": float(bd.stat_life_regained[seats].mean()),
             "kills": float(bd.stat_kills[seats].mean()),
+            # 遊休率は報酬ではなく指標。敵がいるあいだに射程内へ敵が来なかった塔の割合
+            "idle_rate": float((bd.stat_idle_slots[seats].sum()
+                                / max(bd.stat_tower_slots[seats].sum(), 1.0))),
             "coins_earned": float(bd.stat_coins_earned[seats].mean()),
             "cards_played": float(self.stat_cards_played[seats].sum()),
             "cards_drawn": float(self.stat_cards_drawn[seats].sum()),
@@ -1020,6 +1226,8 @@ class VersusEnv:
         g[:, 8] = np.minimum(self.coverage / 4.0, 2.0)
         g[:, 9] = self.path_mask
         g[:, 10] = self.flight_mask
+        g[:, 14] = self.pad_now
+        g[:, 15] = self.pad_gain
 
         n_e = int(bd.en_count.max()) if self.n else 0
         if n_e:
@@ -1064,6 +1272,8 @@ class VersusEnv:
         alive_count = np.zeros(self.n_envs, dtype=np.float32)
         np.add.at(alive_count, env, (bd.alive & self.active).astype(np.float32))
         players = self.env_players[env].astype(np.float32)
+        # 送りが湧く島の数。撃破報酬の 1 体あたりの取り分がこれで決まる
+        opp_alive = np.maximum(1.0, alive_count[env] - 1.0)
 
         n_e = int(bd.en_count.max()) if self.n else 0
         if n_e:
@@ -1082,7 +1292,8 @@ class VersusEnv:
             _safe_div(cheap_tower, income),
             _safe_div(send_cost, income),
             _safe_div(mean_up, income),
-            _safe_div(t.at_reward[env].mean(axis=1), t.at_cost[env].mean(axis=1)),
+            _safe_div(t.at_reward_total[env].mean(axis=1),
+                      t.at_cost[env].mean(axis=1) * np.maximum(1.0, opp_alive)),
             self.hand_n / HAND_LIMIT,
             self.pile_n / self.lib_size,
             np.clip(self.env_card_timer[env] / np.maximum(t.card_interval[env], 1), 0, 1),
@@ -1111,7 +1322,8 @@ class VersusEnv:
         block = np.stack(col, axis=1).astype(np.float32)
         s[:, :30] = np.nan_to_num(block, nan=0.0, posinf=10.0, neginf=-10.0)
         s[:, 30:] = np.nan_to_num(
-            build_unit_features(t, env, bd.income, bd.coins, bd.stock, self.size),
+            build_unit_features(t, env, bd.income, bd.coins, bd.stock, self.size,
+                                opp_alive),
             nan=0.0, posinf=10.0, neginf=-10.0)
 
     def _current_rank(self) -> np.ndarray:

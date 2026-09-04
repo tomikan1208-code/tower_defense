@@ -21,12 +21,12 @@ import net.minestom.server.sound.SoundEvent;
  * <p>ルールは Hypixel の TowerWars を下敷きにしている。</p>
  * <ul>
  *   <li>ライフ 20。送られたモンスターが自陣に到達するたびに減る</li>
- *   <li>コインは一定間隔で「インカム」ぶん入る。間隔は人数が少ないほど短くなる
- *       （2 人なら 5 秒、7 人以上で 10 秒）</li>
+ *   <li>コインは 10 秒ごとに「インカム」ぶん入る（人数によらず一定）</li>
  *   <li><b>インカムが増えるのは送ったときだけ</b>。守りに使うか収入に回すかが最大の判断</li>
  *   <li>撃破するとコインが入り、そのぶんインカムも少し伸びる</li>
  *   <li>送りは相手を選べない。<b>生き残っている全員に同時に飛ぶ</b></li>
- *   <li>ストックは 30、毎秒 1 回復。撃ちっぱなしを防ぐ</li>
+ *   <li>ストックは 30、毎秒 1 回復。<b>どのモンスターも消費は 1</b>。
+ *       これは「1 秒に 1 回しか送れない」という回数制限であって、強さの値付けではない</li>
  * </ul>
  *
  * <p>地形は全員まったく同じ（同一シードで生成）。開幕は完全に同条件で、
@@ -40,22 +40,76 @@ public final class VersusMatch {
     /** 準備時間。迷路は落ち着いて組みたいので、開幕だけは送りを止める。 */
     public static final int PREP_TICKS = 20 * 60;
 
-    /** 収入が入る間隔（人数が揃っているときの基準）。 */
-    public static final int INCOME_INTERVAL = 20 * 10;
-
     /**
-     * 収入間隔の下限。少人数でもここより速くはしない。
+     * 収入が入る間隔。<b>人数によらず常に 10 秒</b>（Hypixel TowerWars と同じ）。
      *
-     * <p>送りは生存者全員に飛ぶので、人数が少ないほど自分に届く敵も少なくなり、
-     * 撃破報酬が減ってコインが貯まらない。そのぶんを定期収入の速さで補う。</p>
+     * <p>かつては「少人数ほど速く」していた。人数が少ないと自分に届く敵も少なく、
+     * 撃破報酬が細ってコインが貯まらないので、そのぶんを定期収入の速さで補う狙いだった。
+     * <b>だがこの補正は指数の肩に乗る。</b> インカムは
+     * {@code 収入間隔ぶんの一} の速さで自己増殖するので、間隔を半分にすると
+     * 成長率がそのまま倍になり、20 分後には桁違いの差になる。
+     * 少人数の不利は {@link AttackerKind#KILL_REWARD_TOTAL}
+     * （撃破報酬の総量を人数で割って一定にする）側で埋めてある。</p>
      */
-    public static final int MIN_INCOME_INTERVAL = 20 * 5;
-
-    /** ここまで人数がいれば基準どおりの 10 秒間隔になる。 */
-    private static final int FULL_LOBBY = 7;
+    public static final int INCOME_INTERVAL = 20 * 10;
 
     /** ストックの回復間隔。 */
     public static final int STOCK_INTERVAL = 20;
+
+    /**
+     * 1 回の操作でまとめて送れる上限。ストック上限と同じ。
+     *
+     * <p>人間はもともと送りメニューを連打すればストックぶん撃てる。
+     * これは <b>AI が 1 手でそれを表せるようにする</b> ためのもので、
+     * 新しいルールではない。持続レートはストック回復（毎秒 1）で決まるので
+     * まとめても総数は増えず、増えるのは「空く手数」のほう。</p>
+     */
+    public static final int MAX_SEND_BATCH = VersusPlayer.MAX_STOCK;
+
+    /**
+     * まとめ送りしたときに、1 体ずつずらして湧かせる間隔（tick）。
+     *
+     * <p><b>同座標に一度に湧かせてはいけない。</b> 範囲攻撃と連鎖が 1 塊に当たるので、
+     * 実際より柔らかく（単体火力には硬く）なる。人間が連打しても 1 体ずつ間が空くので、
+     * そちらに合わせる。学習環境の戦闘刻み（{@code COMBAT_DT} = 4 tick）と同じ値。</p>
+     */
+    public static final int SEND_STAGGER_TICKS = 4;
+
+    /**
+     * 送りの厚みを揃える基準の相手人数（＝ 6 人ロビー）。
+     *
+     * <p><b>送りは生き残っている全員に同時に飛ぶ。</b> つまり守る側から見た
+     * 「浴びる量」は相手の人数にそのまま比例するのに、自分が建てられる塔は
+     * {@code Island.MAX_TOWERS} 基で変わらない。2 人戦では 1 体しか来ないので
+     * 何を送っても抜けず（決着率 0%）、8 人戦では 7 体同時に来るので
+     * 守りようがない、という形になっていた。</p>
+     *
+     * <p>撃破報酬と同じ原理で、<b>1 回の送りが盤面に生む総量を人数によらず一定</b>に
+     * する。総量を揃える先がコインなら {@code KILL_REWARD_TOTAL}、
+     * 耐力ならここ。人数が少ないほど 1 体が分厚くなる。</p>
+     */
+    public static final int REFERENCE_OPPONENTS = 5;
+
+    /**
+     * 人数正規化の効かせ具合。1.0 で「浴びる耐力の総量」がぴったり揃う。
+     *
+     * <p><b>1.0 では効きすぎる。</b> 実測すると 2 人戦が今度は送り側の勝率 100% になった。
+     * <b>1 体を 5 倍太らせるのと 5 体送るのは等価ではない</b>ためで、
+     * 範囲攻撃・連鎖・燃焼はどれも「体数」に効くので、
+     * 太った 1 体は同じ総耐力の 5 体よりずっと硬い。</p>
+     *
+     * <p>2 人 / 4 人 / 8 人 x 24 試合 x 20 分の対称性チェックを
+     * 0.3 / 0.5 / 0.7 で回して決めた（{@code ai/sweep_send_power.py}）。
+     * 引き分けを除いた守り側の勝率:</p>
+     *
+     * <pre>
+     *          2 人    4 人    8 人
+     *   0.3    100%    86%   100%
+     *   0.5     91%    66%    50%
+     *   0.7     48%    46%    25%   ← 採用
+     * </pre>
+     */
+    public static final double SEND_POWER_EXPONENT = 0.7;
 
     /** ここを過ぎると漏らしたときのライフ減少が倍になる（長期戦を畳む）。 */
     public static final int SUDDEN_DEATH_TICKS = 20 * 60 * 15;
@@ -159,6 +213,29 @@ public final class VersusMatch {
         return tick >= SUDDEN_DEATH_TICKS ? 2 : 1;
     }
 
+    /**
+     * 送られたモンスターの耐力に掛かる倍率。
+     *
+     * <p>相手が少ないほど 1 体が分厚くなる
+     * （2 人戦で 2.24 倍、6 人戦で等倍、8 人戦で 0.85 倍）。</p>
+     *
+     * <p><b>平方根なのは、実測でそうしないと合わなかったから。</b>
+     * 人数ぶんをそのまま（{@code 5 / 相手人数}）掛けると効きすぎて、
+     * 2 人戦が今度は送り側の勝率 100% になった。
+     * <b>1 体を 5 倍太らせるのと、5 体送るのは等価ではない</b>ためで、
+     * 範囲攻撃・連鎖・燃焼はどれも「体数」に効くので、
+     * 太った 1 体は同じ総耐力の 5 体よりずっと硬い。
+     * 半分だけ埋めるくらいがちょうど釣り合う
+     * （2 人 / 4 人 / 8 人での対称性チェックで測った）。</p>
+     *
+     * <p>体数ではなく耐力で揃えるのは、体数で揃えると 2 人戦で毎秒 5 体湧いて
+     * エンティティが破綻するため。</p>
+     */
+    public double sendPowerScale() {
+        return Math.pow((double) REFERENCE_OPPONENTS / Math.max(1, aliveCount() - 1),
+                SEND_POWER_EXPONENT);
+    }
+
     /** 生き残っている参加者の数。 */
     public int aliveCount() {
         int count = 0;
@@ -170,16 +247,9 @@ public final class VersusMatch {
         return count;
     }
 
-    /**
-     * 現在の収入間隔。生存者 1 人につき 1 秒ぶん延び、7 人以上で基準の 10 秒になる。
-     *
-     * <p>2 人なら 5 秒 = 基準の 2 倍の速さ。脱落で人数が減ったときも同じように
-     * 速くなるので、終盤に経済が止まって膠着することがない。</p>
-     */
+    /** 現在の収入間隔。人数によらず一定（{@link #INCOME_INTERVAL} の説明を参照）。 */
     public int incomeInterval() {
-        int alive = Math.max(2, Math.min(FULL_LOBBY, aliveCount()));
-        int interval = INCOME_INTERVAL - (FULL_LOBBY - alive) * 20;
-        return Math.max(MIN_INCOME_INTERVAL, interval);
+        return INCOME_INTERVAL;
     }
 
     /** 収入間隔の秒数。表示用。 */
@@ -299,6 +369,19 @@ public final class VersusMatch {
      * @return UI に出すメッセージ。送れなかった理由もここに入る
      */
     public String send(VersusPlayer sender, AttackerKind kind) {
+        return send(sender, kind, 1);
+    }
+
+    /**
+     * まとめて送る。
+     *
+     * <p><b>払える数まで黙って切り詰める。</b>「30 送ろうとして 7 しか送れなかった」は
+     * 失敗ではなく普通の判断なので、ここを弾くと大きい数を選ぶこと自体が怖くなる
+     * （AI にとってはそのまま学習の障害になる）。</p>
+     *
+     * @param count 送りたい体数。1 未満は 1 に、{@link #MAX_SEND_BATCH} 超は上限に丸める
+     */
+    public String send(VersusPlayer sender, AttackerKind kind, int count) {
         if (finished) {
             return "試合は終わっています";
         }
@@ -311,10 +394,23 @@ public final class VersusMatch {
         if (sender.income() < kind.unlockIncome()) {
             return kind.displayName() + " はインカム " + kind.unlockIncome() + " で解禁されます";
         }
-        if (sender.stock() < kind.stockCost()) {
-            return "ストックが足りません（" + kind.stockCost() + " 必要 / 残り " + sender.stock() + "）";
+        int want = Math.max(1, Math.min(count, MAX_SEND_BATCH));
+        int affordable = Math.min(sender.coins() / Math.max(1, kind.cost()),
+                sender.stock() / Math.max(1, kind.stockCost()));
+        int batch = Math.min(want, affordable);
+        if (batch <= 0) {
+            return sender.stock() < kind.stockCost()
+                    ? "ストックが足りません（" + kind.stockCost() + " 必要 / 残り "
+                            + sender.stock() + "）"
+                    : "コインが足りません（" + kind.cost() + " 必要）";
         }
-        if (!sender.paySend(kind)) {
+        for (int i = 0; i < batch; i++) {
+            if (!sender.paySend(kind)) {
+                batch = i;
+                break;
+            }
+        }
+        if (batch <= 0) {
             return "コインが足りません（" + kind.cost() + " 必要）";
         }
 
@@ -323,13 +419,15 @@ public final class VersusMatch {
             if (other == sender || !other.alive() || other.island() == null) {
                 continue;
             }
-            other.island().receive(kind, sender);
+            other.island().receive(kind, sender, batch);
             targets++;
         }
 
-        announce(Component.text(sender.name() + " が " + kind.displayName()
-                + " を送った（インカム +" + kind.incomeGain() + "）", NamedTextColor.YELLOW));
-        return kind.displayName() + " を " + targets + " 人へ送信（インカム " + sender.income() + "）";
+        String many = batch > 1 ? " x" + batch : "";
+        announce(Component.text(sender.name() + " が " + kind.displayName() + many
+                + " を送った（インカム +" + kind.incomeGain() * batch + "）", NamedTextColor.YELLOW));
+        return kind.displayName() + many + " を " + targets + " 人へ送信（インカム "
+                + sender.income() + "）";
     }
 
     // ================================================================ 勝敗

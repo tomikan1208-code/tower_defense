@@ -3,10 +3,27 @@
 
 **設計の核: 生の絶対値をほとんど入れない。**
 「弓塔のコストは 30」を覚えた方策は、コストを 35 に変えた瞬間に壊れる。
-代わりに「いちばん安い塔は何秒ぶんのインカムで買えるか」「この塔の DPS は
-コストあたりどれくらいか」といった **比** を渡す。数値を変えても比の意味は
-変わらないので、**再学習なしである程度動く**。ドメインランダム化
-(:func:`balance.randomized_balance`) と対で効く。
+代わりに「いちばん安い塔は何秒ぶんのインカムで買えるか」のような **比** を渡す。
+数値を変えても比の意味は変わらないので、**再学習なしである程度動く**。
+ドメインランダム化 (:func:`balance.randomized_balance`) と対で効く。
+
+**ただし「良い塔かどうか」の合成値は渡さない。**
+以前は塔の特徴の先頭 2 つが ``DPS / コスト`` だった。その DPS は
+``ダメージ x 20 / クールダウン`` で、splash・chain・slow・burn・支援効果を
+一切含まない見かけの値だったので、観測は
+
+===========  =====================
+弓塔          0.389（1 位）
+弩塔          0.360（貫通 3 体を無視して 2 位）
+雷塔          0.231（連鎖 3 体を無視）
+砲塔          0.118（splash を無視）
+呪詛塔/監視塔  **0.000**
+===========  =====================
+
+と言っていた。壊れていた旧報酬（コイン獲得を最大化する形になっていた）と
+噛み合って、方策は弓と弩しか建てなくなっていた。
+**比を渡すことと、価値の合成を渡すことは別**で、後者は設計者の答えの押し付けになる。
+いまは生の性能と土台の形だけを渡し、合成は方策に任せる。
 
 盤面チャンネルの選び方
 ----------------------
@@ -14,6 +31,14 @@
 「蛇行させて一つの塔の射程を何度も通す」というこのゲームの核心を、
 CNN が直接見られる形にしてある。経路チャンネルと重ねれば
 「どこを通れば何基に撃たれるか」がそのまま画像になる。
+
+もう 1 つの肝が :data:`CH_PAD_NOW` と :data:`CH_PAD_GAIN`
+(:func:`grid.big_pad_masks`)。大型塔は 2x2 や 1x3 の土台を要求するのに、
+塔の設置マスクは「いま置けるか」しか伝えない。**「あと 1 マスで土台になる」**
+はここでしか読めない。ベンチの実測では、迷路だけ土台重視にすると漏れが倍に
+悪化し、塔だけ大型にすると土台不足で 24 枠中 15 基しか建たない。
+**両方を同時に変えて初めて漏れが半分以下になる**ので、報酬の勾配だけで
+この谷を渡るのは難しい。
 
 相手の観測（§4-4）
 ------------------
@@ -53,12 +78,16 @@ CH_FLIGHT = 10      # 飛行敵の直線ルート（迷路を無視する）
 CH_ENEMY = 11       # 敵の数（正規化）
 CH_ENEMY_HP = 12    # 敵の HP 比の合計
 CH_ENEMY_THREAT = 13  # コアへの近さで重み付けした敵の圧力
-N_CHANNELS = 14
+#: いま大型塔（2x2 / 1x3）を載せられる土台
+CH_PAD_NOW = 14
+#: **あと 1 マス置けば**大型塔の土台になる、カードを置けるセル
+CH_PAD_GAIN = 15
+N_CHANNELS = 16
 
 #: 相手 1 人ぶんの特徴数
 OPP_FEATURES = 14
 #: 塔 1 種ぶんの特徴数
-TOWER_FEATURES = 8
+TOWER_FEATURES = 19
 #: 送り 1 種ぶんの特徴数
 ATTACK_FEATURES = 9
 
@@ -70,6 +99,28 @@ BASE_SCALARS = 30
 
 SCALAR_DIM = (BASE_SCALARS + N_TOWER * TOWER_FEATURES
               + N_ATTACK * ATTACK_FEATURES)
+
+
+def _footprint_table() -> np.ndarray:
+    """塔ごとの土台の形。``(K, 2)`` = (セル数, 長辺)。
+
+    塔の形は 4 種類しかなく、この 2 つで一意に区別できる::
+
+        DOT (1x1) = (1, 1)   I2 (1x2) = (2, 2)
+        I3  (1x3) = (3, 3)   O  (2x2) = (4, 2)
+
+    ドメインランダム化は数値を揺らすが形は変えないので、起動時に一度作れば足りる。
+    """
+    out = np.zeros((N_TOWER, 2), dtype=np.float32)
+    for k, key in enumerate(B.TOWER_ORDER):
+        cells = B.SHAPE_CELLS[B.TOWERS[key].shape]
+        w = max(c[0] for c in cells) + 1
+        h = max(c[1] for c in cells) + 1
+        out[k] = (len(cells), max(w, h))
+    return out
+
+
+FOOTPRINT = _footprint_table()
 
 
 def _safe_div(a, b, cap: float = 10.0):
@@ -118,7 +169,8 @@ class ObservationBuilder:
 
 def build_unit_features(tables, env_of: np.ndarray, income: np.ndarray,
                         coins: np.ndarray, stock: np.ndarray,
-                        board_size: int) -> np.ndarray:
+                        board_size: int,
+                        opponents_alive: np.ndarray) -> np.ndarray:
     """塔と送りの「性能 / コスト」特徴。 (§4-3)
 
     **数値を変えても壊れない**ための中心部分。実効 DPS も送りの効用も、
@@ -127,29 +179,47 @@ def build_unit_features(tables, env_of: np.ndarray, income: np.ndarray,
     """
     n = len(env_of)
     env = env_of
+    # 撃破報酬の総量は人数によらず一定なので、1 体あたりの取り分は
+    # 「いま何人に湧くか」だけで決まる (AttackerKind#KILL_REWARD_TOTAL)
+    opponents = np.maximum(1.0, opponents_alive.astype(np.float32))
     out = np.zeros((n, N_TOWER * TOWER_FEATURES + N_ATTACK * ATTACK_FEATURES),
                    dtype=np.float32)
 
     # --- 塔 ---
-    # Lv0 と Lv3 の両方を見せる。「いま買える強さ」と「伸びしろ」は別の判断
-    cost = tables.tw_cost[env]                              # (n, K)
-    dmg0 = tables.tw_damage[env, :, 0, 0]
-    cd0 = np.maximum(tables.tw_cooldown[env, :, 0, 0], 1.0)
-    dps0 = dmg0 * B.TICKS_PER_SECOND / cd0
-    dmg3 = tables.tw_damage[env, :, 3, 1]
-    cd3 = np.maximum(tables.tw_cooldown[env, :, 3, 1], 1.0)
-    dps3 = dmg3 * B.TICKS_PER_SECOND / cd3
-    full_cost = cost + tables.tw_upgrade[env, :, :3].sum(axis=2)
+    # **合成値は渡さない。** Lv0 と Lv3 の両方を見せるのは残す
+    # （「いま買える強さ」と「伸びしろ」は別の判断だから）。
+    cost = tables.tw_cost[env].astype(np.float32)           # (n, K)
+    top = B.MAX_TOWER_LEVEL
+    full_cost = (cost + tables.tw_upgrade[env, :, :top].sum(axis=2)).astype(np.float32)
+    rate0 = B.TICKS_PER_SECOND / np.maximum(tables.tw_cooldown[env, :, 0, 0], 1.0)
+    rate3 = B.TICKS_PER_SECOND / np.maximum(tables.tw_cooldown[env, :, top, 1], 1.0)
+    shape = cost.shape
 
     feats = [
-        _safe_div(dps0, cost) / 2.0,                        # DPS / コスト
-        _safe_div(dps3, full_cost) / 2.0,                   # 完成時の DPS / 総コスト
-        tables.tw_range[env, :, 0, 0] / board_size,         # 射程 / 盤面
-        _safe_div(cost, income[:, None]),                   # 何秒ぶんのインカムか
-        _safe_div(full_cost, income[:, None]) / 5.0,
+        # 経済
+        cost / 100.0,
+        _safe_div(cost, income[:, None]) / 10.0,            # 何秒ぶんのインカムか
+        full_cost / 400.0,
+        # 攻撃力（ダメージと発射レートを分けて渡す。掛けるかどうかは方策が決める）
+        tables.tw_damage[env, :, 0, 0] / 50.0,
+        tables.tw_damage[env, :, top, 1] / 50.0,
+        rate0 / 2.0,                                        # 発 / 秒
+        rate3 / 2.0,
+        tables.tw_range[env, :, 0, 0] / board_size,
+        tables.tw_range[env, :, top, 1] / board_size,
+        # 単発ダメージに乗らない効果。ここが無いと支援・妨害塔が「性能 0」に見える
         tables.tw_splash[env, :, 0, 0] / 4.0,
-        tables.tw_chain[env, :, 0, 0] / 8.0,
-        tables.tw_slow[env, :, 0, 0] + tables.tw_burn[env, :, 0, 0] / 20.0,
+        tables.tw_chain[env, :, 0, 0].astype(np.float32) / 8.0,
+        tables.tw_slow[env, :, 0, 0],
+        tables.tw_burn[env, :, 0, 0] / 20.0,
+        tables.tw_vuln[env, :, 0, 0],                       # 呪詛（旧観測に無かった）
+        tables.tw_boost_dmg[env, :, 0, 0],                  # 支援・与ダメ（同上）
+        tables.tw_boost_rate[env, :, 0, 0],                 # 支援・連射（同上）
+        tables.tw_banish[env, :, 0, 0],                     # 送還（同上）
+        # 土台の形。塔の設置マスクは「いま置けるか」しか伝えないので、
+        # 「この塔は 2x2 を要求する」という**ルールそのもの**を明示する
+        np.broadcast_to(FOOTPRINT[None, :, 0] / 4.0, shape),
+        np.broadcast_to(FOOTPRINT[None, :, 1] / 3.0, shape),
     ]
     tower_block = np.stack(feats, axis=2).reshape(n, -1)
     out[:, :N_TOWER * TOWER_FEATURES] = tower_block
@@ -167,7 +237,9 @@ def build_unit_features(tables, env_of: np.ndarray, income: np.ndarray,
         _safe_div(leak_utility, a_cost) / 10.0,              # リーク効用 / コスト
         _safe_div(tables.at_income[env], a_cost) * 20.0,     # インカム増 / コスト
         tables.at_unlock[env] / 300.0,                       # 解禁インカム
-        _safe_div(tables.at_reward[env], a_cost),            # 防御側の回収率
+        # 防御側の回収率。総量は固定なので、いま何人に湧くかで 1 体あたりが決まる
+        _safe_div(tables.at_reward_total[env],
+                  a_cost * opponents[:, None]),
         tables.at_stock[env] / 5.0,
         (income[:, None] >= tables.at_unlock[env]).astype(np.float32),
         ((coins[:, None] >= a_cost)
